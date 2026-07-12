@@ -18,7 +18,7 @@ fortochka живёт в системном трее и состоит из дв�
 ## Как работает
 
 ```
-Telegram ────SOCKS5──┐
+Telegram ────SOCKS5───┐
 Browser  ─────PAC─────┼─→ proxy → rules ─ direct → OZON, LAN, …
 claude.exe ─WinDivert─┘                  └ wg → your server → blocked sites
 ```
@@ -27,24 +27,29 @@ claude.exe ─WinDivert─┘                  └ wg → your server → blocke
 - **Браузер** идёт по системному PAC → на локальный прокси (`127.0.0.1:1080`).
 - **Приложения** можно завернуть целиком через WinDivert — *весь* TCP выбранного процесса уходит в туннель, без настройки прокси.
 
+## Установка
+
+1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится иконка **f**
+2. Трей → **Import WG config…** → выбери свой WireGuard `.conf` 
+
 ## Меню в трее
 
 ```
-Connected                      status: Disconnected / Connecting… / No config imported / Engine off
-Disconnect                     connect / disconnect the tunnel
+Connected                      статус: Disconnected / Connecting… / No config imported / Engine off
+Disconnect                     подключить / отключить туннель
 ───
 Import WG config…
-Connection info ▸              Server / PAC / SOCKS5 addresses
+Connection info ▸              адреса Server / PAC / SOCKS5
 ───
-Route address through tunnel…  edit the routed domain/IP list
-Route app through tunnel ▸     tick running apps to tunnel whole
-Service ▸                      start/stop
-                               Start with Windows
-                               Uninstall
-More ▸                         Open program folder
-                               Show / hide log
+Route address through tunnel…  редактировать список доменов/IP для туннеля
+Route app through tunnel ▸     отметить приложения — весь их трафик в туннель
+Service ▸                      старт/стоп службы
+                               Start with Windows — автозапуск с системой
+                               Uninstall — удалить службу
+More ▸                         Open program folder — папка данных
+                               Show / hide log — окно логов
 ───
-Quit                           close the tray (engine keeps running, unless uninstalled)
+Quit                           закрыть трей (движок продолжит работать, если не удалён)
 ```
 
 <img src="cmd/fortochka/icon.png" width="22" align="absmiddle"> отключён &nbsp;&nbsp;

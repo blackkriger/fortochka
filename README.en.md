@@ -18,7 +18,7 @@ The engine runs in the background and starts with Windows by default.
 ## How it works
 
 ```
-Telegram ────SOCKS5──┐
+Telegram ────SOCKS5───┐
 Browser  ─────PAC─────┼─→ proxy → rules ─ direct → OZON, LAN, …
 claude.exe ─WinDivert─┘                  └ wg → your server → blocked sites
 ```
@@ -26,6 +26,11 @@ claude.exe ─WinDivert─┘                  └ wg → your server → blocke
 - **Rules decide direct vs tunnel per destination.** Blocked domains/IPs (auto-fetched [Re:filter](https://github.com/1andrevich/Re-filter-lists) lists) plus your own list go through WG; the default is direct.
 - **Browser** follows the system PAC → the local proxy (`127.0.0.1:1080`).
 - **Apps** can be routed whole via WinDivert — *all* of a chosen process's TCP goes through the tunnel, no proxy settings required.
+
+## Install
+
+1. Download the [latest release](https://github.com/blackkriger/fortochka/releases/latest) and run `fortochka.exe`. On first launch it installs the engine service and enables Start with Windows (a one-time admin prompt); the `f` icon appears in the tray.
+2. Tray → **Import WG config…** → pick your WireGuard `.conf` 
 
 ## The tray menu
 
