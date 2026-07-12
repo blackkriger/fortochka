@@ -1,0 +1,36 @@
+# Copy to fortochka.yaml. The WG tunnel is normally imported from the tray
+# ("Import WG config…", pick your .conf) and remembered across restarts — so
+# the wg block below is OPTIONAL. Fill it only if you prefer a static config.
+
+wg:
+  endpoint: your-server.example:51820
+  private_key: ""          # base64 client key; leave empty to import from tray
+  server_public_key: ""
+  preshared_key: ""        # optional; only if your peer has PresharedKey
+  address: 10.7.0.2/32     # your client IP inside the tunnel
+  dns: 1.1.1.1             # resolver used for tunnelled lookups
+
+listen:
+  proxy: 127.0.0.1:1080   # SOCKS5 + HTTP on one port (point Telegram here)
+  pac:   127.0.0.1:1081   # serves proxy.pac for the system/browser
+
+lists:
+  refilter_domains: https://github.com/1andrevich/Re-filter-lists/releases/latest/download/domains_all.lst
+  refilter_ips:     https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ipsum.lst
+  refresh: 6h
+  default_action: direct   # everything not matched goes straight out
+
+# Manual overrides win over the fetched lists.
+rules:
+  - { suffix: "t.me",            action: wg }
+  - { suffix: "telegram.org",    action: wg }
+  - { cidr:   "91.108.4.0/22",   action: wg }
+  - { cidr:   "91.108.8.0/22",   action: wg }
+  - { cidr:   "91.108.12.0/22",  action: wg }
+  - { cidr:   "91.108.16.0/22",  action: wg }
+  - { cidr:   "91.108.20.0/22",  action: wg }
+  - { cidr:   "91.108.56.0/22",  action: wg }
+  - { cidr:   "91.105.192.0/23", action: wg }
+  - { cidr:   "149.154.160.0/20", action: wg }
+  - { cidr:   "185.76.151.0/24", action: wg }
+  - { suffix: "ozon.ru",         action: direct }
