@@ -28,21 +28,25 @@ type Server struct {
 	Direct Dialer
 	WG     Dialer
 
+	// ForceWG reports whether the process owning a client's local TCP port is a per-app-tunneled app; if so its proxied traffic goes through WG regardless of the rules. nil disables the check.
+	ForceWG func(localPort uint16) bool
+
 	mu     sync.Mutex
 	active map[net.Conn]connRoute
 }
 
 type connRoute struct {
-	host string
-	wg   bool
+	host   string
+	wg     bool
+	forced bool // routed to WG because the owning process is per-app-tunneled, not by rule
 }
 
-func (s *Server) track(c net.Conn, host string, wg bool) {
+func (s *Server) track(c net.Conn, host string, wg, forced bool) {
 	s.mu.Lock()
 	if s.active == nil {
 		s.active = map[net.Conn]connRoute{}
 	}
-	s.active[c] = connRoute{host, wg}
+	s.active[c] = connRoute{host, wg, forced}
 	s.mu.Unlock()
 }
 
@@ -52,11 +56,14 @@ func (s *Server) untrack(c net.Conn) {
 	s.mu.Unlock()
 }
 
-// Rebalance closes active connections whose Direct/WG decision changed after a rules update, so the client reconnects onto the new route at once instead of riding the old one until it idles out.
+// Rebalance closes active connections whose Direct/WG decision changed after a rules update, so the client reconnects onto the new route at once instead of riding the old one until it idles out. Per-app-forced connections are left alone — they stay on WG regardless of rules.
 func (s *Server) Rebalance() {
 	s.mu.Lock()
 	var stale []net.Conn
 	for c, r := range s.active {
+		if r.forced {
+			continue
+		}
 		if (s.Engine.Decide(r.host) == rules.WG) != r.wg {
 			stale = append(stale, c)
 		}
@@ -93,24 +100,37 @@ func (s *Server) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	forceWG := s.forceWGFor(conn)
 	if first[0] == 0x05 {
-		s.handleSocks(conn, br)
+		s.handleSocks(conn, br, forceWG)
 		return
 	}
-	s.handleHTTP(conn, br)
+	s.handleHTTP(conn, br, forceWG)
 }
 
-func (s *Server) dialerFor(host string) (Dialer, string) {
-	if s.Engine.Decide(host) == rules.WG {
+// forceWGFor asks whether the process behind this client connection is a per-app-tunneled app, so all its proxied traffic is forced through WG (this is what makes marking a proxy-aware app actually tunnel everything it sends, not just rule-matched hosts).
+func (s *Server) forceWGFor(conn net.Conn) bool {
+	if s.ForceWG == nil {
+		return false
+	}
+	ra, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	return s.ForceWG(uint16(ra.Port))
+}
+
+func (s *Server) dialerFor(host string, forceWG bool) (Dialer, string) {
+	if forceWG || s.Engine.Decide(host) == rules.WG {
 		return s.WG, "wg"
 	}
 	return s.Direct, "direct"
 }
 
-func (s *Server) relay(client net.Conn, host, port string) {
+func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
 	client.SetReadDeadline(time.Time{})
-	dialer, route := s.dialerFor(host)
-	s.track(client, host, route == "wg")
+	dialer, route := s.dialerFor(host, forceWG)
+	s.track(client, host, route == "wg", forceWG)
 	defer s.untrack(client)
 	log.Printf("proxy: %s -> %s:%s via %s", client.RemoteAddr(), host, port, route)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -144,7 +164,7 @@ func halfClose(c net.Conn) {
 
 // --- SOCKS5 (CONNECT only, no auth) ---
 
-func (s *Server) handleSocks(conn net.Conn, br *bufio.Reader) {
+func (s *Server) handleSocks(conn net.Conn, br *bufio.Reader, forceWG bool) {
 	// greeting: VER NMETHODS METHODS...
 	head := make([]byte, 2)
 	if _, err := io.ReadFull(br, head); err != nil {
@@ -205,14 +225,14 @@ func (s *Server) handleSocks(conn net.Conn, br *bufio.Reader) {
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
-	s.relay(conn, host, port)
+	s.relay(conn, host, port, forceWG)
 }
 
 // --- HTTP (CONNECT tunnel, plus best-effort plain proxying) ---
 
 const httpIdleTimeout = 60 * time.Second
 
-func (s *Server) handleHTTP(conn net.Conn, br *bufio.Reader) {
+func (s *Server) handleHTTP(conn net.Conn, br *bufio.Reader, forceWG bool) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(httpIdleTimeout))
 		req, err := http.ReadRequest(br)
@@ -224,20 +244,20 @@ func (s *Server) handleHTTP(conn net.Conn, br *bufio.Reader) {
 			if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 				return
 			}
-			s.relay(conn, host, port)
+			s.relay(conn, host, port, forceWG)
 			return
 		}
-		if !s.forwardHTTP(conn, req) {
+		if !s.forwardHTTP(conn, req, forceWG) {
 			return
 		}
 	}
 }
 
 // forwardHTTP proxies one plain-HTTP request and reads the whole response back with http.ReadResponse (so the body is properly delimited), reporting whether the client connection may carry another request (keep-alive).
-func (s *Server) forwardHTTP(conn net.Conn, req *http.Request) bool {
+func (s *Server) forwardHTTP(conn net.Conn, req *http.Request, forceWG bool) bool {
 	host, port := splitHostPort(req.Host, "80")
-	dialer, route := s.dialerFor(host)
-	s.track(conn, host, route == "wg")
+	dialer, route := s.dialerFor(host, forceWG)
+	s.track(conn, host, route == "wg", forceWG)
 	defer s.untrack(conn)
 	log.Printf("proxy: %s -> %s:%s via %s (http %s)", conn.RemoteAddr(), host, port, route, req.Method)
 

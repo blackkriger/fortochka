@@ -55,6 +55,24 @@ func parse(r io.Reader) (wg.Config, error) {
 				c.Address = firstField(val)
 			case "dns":
 				c.DNS = firstField(val)
+			case "jc":
+				c.Jc = val
+			case "jmin":
+				c.Jmin = val
+			case "jmax":
+				c.Jmax = val
+			case "s1":
+				c.S1 = val
+			case "s2":
+				c.S2 = val
+			case "h1":
+				c.H1 = val
+			case "h2":
+				c.H2 = val
+			case "h3":
+				c.H3 = val
+			case "h4":
+				c.H4 = val
 			}
 		case "peer":
 			switch key {

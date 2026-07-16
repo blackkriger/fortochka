@@ -21,6 +21,7 @@ import (
 	"fortochka/internal/ipc"
 	"fortochka/internal/lists"
 	"fortochka/internal/pac"
+	"fortochka/internal/procnet"
 	"fortochka/internal/proxy"
 	"fortochka/internal/rules"
 	"fortochka/internal/userrules"
@@ -44,6 +45,12 @@ type Daemon struct {
 	tunnelWanted bool
 	selApps      map[string]bool
 	lastState    wg.State
+	rebuildFails int
+
+	portMu     sync.Mutex
+	portSnap   map[uint16]uint32 // local-TCP-port → PID, refreshed at most every 500ms for the proxy per-app check
+	portSnapAt time.Time
+	pidNames   map[uint32]string
 }
 
 // New builds the engine from cfg (using dir for state/tunnel/rules), starts the proxy/PAC/rules/lists and resumes the tunnel if it was up last session.
@@ -71,13 +78,13 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
 
-	server := &proxy.Server{Engine: engine, Direct: &net.Dialer{}, WG: d.tunnel}
+	server := &proxy.Server{Engine: engine, Direct: &net.Dialer{}, WG: d.tunnel, ForceWG: d.forceWGForPort}
 
 	rulesPath := userrules.Path(dir)
 	if err := userrules.EnsureDefault(rulesPath); err != nil {
 		log.Printf("rules: %v", err)
 	}
-	yamlRules := manualRules(cfg.Rules)
+	yamlRules := append(builtinDirect(), manualRules(cfg.Rules)...)
 	applyManual := func() {
 		custom, err := userrules.Load(rulesPath)
 		if err != nil {
@@ -108,7 +115,7 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 		}
 	}()
 
-	d.pacSrv = &http.Server{Addr: cfg.Listen.PAC, Handler: pac.Handler(cfg.Listen.Proxy)}
+	d.pacSrv = &http.Server{Addr: cfg.Listen.PAC, Handler: pac.Handler(cfg.Listen.Proxy, discordDomains)}
 	go func() {
 		if err := d.pacSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("pac: %v", err)
@@ -192,6 +199,7 @@ func (d *Daemon) Connect() error {
 	}
 	d.mu.Lock()
 	d.tunnelWanted = true
+	d.rebuildFails = 0
 	d.mu.Unlock()
 	d.persist()
 	log.Printf("daemon: connecting -> %s", d.tunnel.Endpoint())
@@ -223,6 +231,7 @@ func (d *Daemon) Import(data []byte) error {
 	secureFile(d.tunnelPath())
 	d.mu.Lock()
 	d.tunnelWanted = true
+	d.rebuildFails = 0
 	d.mu.Unlock()
 	d.persist()
 	log.Printf("daemon: imported config, connecting -> %s", c.Endpoint)
@@ -263,6 +272,9 @@ func (d *Daemon) Close() {
 // reconnectAfter is how long the tunnel may stay down (while wanted) before the supervisor rebuilds it, since the userspace bind can die on a network change and never self-heal.
 const reconnectAfter = 15 * time.Second
 
+// maxRebuildAttempts bounds automatic rebuilds so a tunnel that won't come up (e.g. a stuck server session on a shared WG key) is dropped instead of hammering the key forever and blocking the official client; the user presses Connect to retry.
+const maxRebuildAttempts = 6
+
 // watch drives per-app interception off the tunnel state (WinDivert is active only while connected) and supervises the tunnel, rebuilding it when it dies.
 func (d *Daemon) watch(ctx context.Context) {
 	t := time.NewTicker(time.Second)
@@ -291,6 +303,15 @@ func (d *Daemon) watch(ctx context.Context) {
 func (d *Daemon) superviseTunnel(wanted bool, s wg.State, downSince *time.Time) {
 	if !wanted || s == wg.Connected {
 		*downSince = time.Time{}
+		d.mu.Lock()
+		d.rebuildFails = 0
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Lock()
+	gaveUp := d.rebuildFails >= maxRebuildAttempts
+	d.mu.Unlock()
+	if gaveUp {
 		return
 	}
 	now := time.Now()
@@ -307,15 +328,64 @@ func (d *Daemon) superviseTunnel(wanted bool, s wg.State, downSince *time.Time) 
 		return
 	}
 	d.mu.Lock()
-	stillWanted := d.tunnelWanted
-	d.mu.Unlock()
-	if !stillWanted { // user disconnected while we were deciding
+	if !d.tunnelWanted { // user disconnected while we were deciding
+		d.mu.Unlock()
 		return
 	}
-	log.Printf("wireguard: tunnel down (%s) — rebuilding", stateName(s))
+	d.rebuildFails++
+	fails := d.rebuildFails
+	d.mu.Unlock()
+
+	if fails >= maxRebuildAttempts {
+		log.Printf("wireguard: tunnel down after %d attempts — giving up and closing it (press Connect to retry)", fails)
+		d.tunnel.Close() // stop hammering the shared WG key so the official client can connect
+		d.reconcile()
+		return
+	}
+	log.Printf("wireguard: tunnel down (%s) — rebuilding (%d/%d)", stateName(s), fails, maxRebuildAttempts)
 	if err := d.tunnel.Connect(c); err != nil {
 		log.Printf("wireguard: rebuild failed: %v", err)
 	}
+}
+
+// forceWGForPort reports whether the process owning a proxy client's local TCP port is a per-app-tunneled app, so the proxy routes all of its traffic through WG — this covers proxy-aware apps whose loopback traffic the WinDivert redirect can't see. The port→PID lookup is skipped entirely when no apps are selected.
+func (d *Daemon) forceWGForPort(localPort uint16) bool {
+	d.mu.Lock()
+	n := len(d.selApps)
+	d.mu.Unlock()
+	if n == 0 {
+		return false
+	}
+	name := d.appNameForPort(localPort)
+	if name == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.selApps[name]
+}
+
+// appNameForPort resolves the process name owning a local TCP port, serving the port→PID table from a 500ms cache so a burst of proxy connections shares one OS table walk; PID→name is cached within each snapshot.
+func (d *Daemon) appNameForPort(port uint16) string {
+	d.portMu.Lock()
+	defer d.portMu.Unlock()
+	if d.portSnap == nil || time.Since(d.portSnapAt) > 500*time.Millisecond {
+		if m := procnet.TCPPortPID(); m != nil {
+			d.portSnap = m
+			d.portSnapAt = time.Now()
+			d.pidNames = map[uint32]string{}
+		}
+	}
+	pid := d.portSnap[port]
+	if pid == 0 {
+		return ""
+	}
+	name, ok := d.pidNames[pid]
+	if !ok {
+		name = strings.ToLower(procnet.ProcName(pid))
+		d.pidNames[pid] = name
+	}
+	return name
 }
 
 func (d *Daemon) reconcile() {
@@ -364,6 +434,15 @@ func (d *Daemon) loadWGConfig() (wg.Config, bool) {
 			PresharedKey:    d.cfg.WG.PresharedKey,
 			Address:         d.cfg.WG.Address,
 			DNS:             d.cfg.WG.DNS,
+			Jc:              d.cfg.WG.Jc,
+			Jmin:            d.cfg.WG.Jmin,
+			Jmax:            d.cfg.WG.Jmax,
+			S1:              d.cfg.WG.S1,
+			S2:              d.cfg.WG.S2,
+			H1:              d.cfg.WG.H1,
+			H2:              d.cfg.WG.H2,
+			H3:              d.cfg.WG.H3,
+			H4:              d.cfg.WG.H4,
 		}, true
 	}
 	return wg.Config{}, false
@@ -398,6 +477,24 @@ func manualRules(in []config.Rule) []rules.Rule {
 			CIDR:    r.CIDR,
 			Action:  rules.ParseAction(r.Action),
 		})
+	}
+	return out
+}
+
+// discordDomains are pinned direct: Discord tunnels poorly (voice latency), so it is left to a co-running DPI-bypass tool — hardcoded so no fetched block list can pull it back into the tunnel; kept in sync with zapret's Discord hostlist so no Discord domain leaks back through the proxy.
+var discordDomains = []string{
+	"discord.com", "discord.gg", "discord.media", "discord.app", "discord.co",
+	"discord.design", "discord.dev", "discord.gift", "discord.gifts", "discord.new",
+	"discord.store", "discord.status", "discordapp.com", "discordapp.net", "discordcdn.com",
+	"discordactivities.com", "discord-activities.com", "discordmerch.com",
+	"discordpartygames.com", "discordsays.com", "discordsez.com", "discordstatus.com",
+	"discord-attachments-uploads-prd.storage.googleapis.com",
+}
+
+func builtinDirect() []rules.Rule {
+	out := make([]rules.Rule, 0, len(discordDomains))
+	for _, d := range discordDomains {
+		out = append(out, rules.Rule{Suffix: d, Action: rules.Direct})
 	}
 	return out
 }

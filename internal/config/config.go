@@ -22,6 +22,16 @@ type WG struct {
 	PresharedKey    string `yaml:"preshared_key"`
 	Address         string `yaml:"address"`
 	DNS             string `yaml:"dns"`
+
+	Jc   string `yaml:"jc"`
+	Jmin string `yaml:"jmin"`
+	Jmax string `yaml:"jmax"`
+	S1   string `yaml:"s1"`
+	S2   string `yaml:"s2"`
+	H1   string `yaml:"h1"`
+	H2   string `yaml:"h2"`
+	H3   string `yaml:"h3"`
+	H4   string `yaml:"h4"`
 }
 
 type Listen struct {

@@ -15,21 +15,19 @@ import (
 
 const fileName = "rules.txt"
 
-const template = `# List the sites and addresses that should go THROUGH the VPN tunnel.
-# One entry per line. Lines starting with # are comments and are ignored.
+const template = `# Everything not listed here (and not in the block lists) goes out directly.
 #
 # A domain also matches its subdomains:
-#   rutracker.org        also covers www.rutracker.org, api.rutracker.org, ...
+#   example.org          also covers www.example.org, api.example.org, ...
 #
 # Examples:
-#   instagram.com
 #   x.com
 #   198.51.100.7         a single IP address
 #   203.0.113.0/24       a whole IP range (CIDR)
 #   http://198.51.100.7:8082/  a full URL or host:port also works (scheme/port/path are ignored)
 #
-# Everything not listed here (and not in the block lists) goes out directly.
-# Save the file, changes automatically.
+# Prefix a line with "!" to force it DIRECT instead: it bypasses the tunnel even when a fetched block list would route it through.
+#   !example.com
 
 `
 
@@ -43,7 +41,7 @@ func EnsureDefault(path string) error {
 	return os.WriteFile(path, []byte(template), 0o600)
 }
 
-// Load parses the file into rules that route matching traffic through the VPN.
+// Load parses the file into routing rules: a plain entry routes through the tunnel, a "!"-prefixed entry forces it direct (overriding the fetched block lists).
 func Load(path string) ([]rules.Rule, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -65,6 +63,11 @@ func Load(path string) ([]rules.Rule, error) {
 		if line == "" {
 			continue
 		}
+		action := rules.WG
+		if strings.HasPrefix(line, "!") {
+			action = rules.Direct
+			line = strings.TrimSpace(line[1:])
+		}
 		line = normalizeEntry(line)
 		if line == "" {
 			continue
@@ -73,9 +76,9 @@ func Load(path string) ([]rules.Rule, error) {
 			if !strings.Contains(line, "/") {
 				line += "/32"
 			}
-			out = append(out, rules.Rule{CIDR: line, Action: rules.WG})
+			out = append(out, rules.Rule{CIDR: line, Action: action})
 		} else {
-			out = append(out, rules.Rule{Suffix: strings.TrimPrefix(line, "."), Action: rules.WG})
+			out = append(out, rules.Rule{Suffix: strings.TrimPrefix(line, "."), Action: action})
 		}
 	}
 	return out, sc.Err()

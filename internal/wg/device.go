@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/device"
+	"github.com/amnezia-vpn/amneziawg-go/tun/netstack"
 )
 
 const tunnelMTU = 1420
@@ -30,6 +30,9 @@ type Config struct {
 	PresharedKey    string
 	Address         string
 	DNS             string
+
+	// AmneziaWG obfuscation; empty = plain WireGuard.
+	Jc, Jmin, Jmax, S1, S2, H1, H2, H3, H4 string
 }
 
 // Device is a userspace WireGuard tunnel whose DialContext sends connections out through the tunnel, so the rule engine can pick it for blocked targets.
@@ -57,8 +60,10 @@ func New(c Config) (*Device, error) {
 	d := &Device{net: tnet}
 	logger := &device.Logger{
 		Verbosef: func(format string, args ...any) {
-			log.Printf("wg: "+format, args...)
 			d.noteHandshake(format)
+			if wgLogWorthy(format) {
+				log.Printf("wg: "+format, args...)
+			}
 		},
 		Errorf: func(format string, args ...any) { log.Printf("wg: ERROR: "+format, args...) },
 	}
@@ -78,6 +83,14 @@ func New(c Config) (*Device, error) {
 		return nil, fmt.Errorf("wg up: %w", err)
 	}
 	return d, nil
+}
+
+// wgLogWorthy keeps the WG log to meaningful lines (handshakes, errors) and drops the per-routine/keepalive spam that otherwise floods the file, especially during rebuild loops.
+func wgLogWorthy(format string) bool {
+	return strings.Contains(format, "andshake") ||
+		strings.Contains(format, "Failed") ||
+		strings.Contains(format, "Invalid") ||
+		strings.Contains(format, "error")
 }
 
 // noteHandshake tracks re-handshake failures so a silently dead tunnel is spotted in seconds instead of waiting out the whole reject window.
@@ -131,6 +144,10 @@ func ipcConfig(c Config) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "private_key=%s\n", priv)
+	if c.Jc != "" {
+		fmt.Fprintf(&b, "jc=%s\njmin=%s\njmax=%s\ns1=%s\ns2=%s\n", c.Jc, c.Jmin, c.Jmax, c.S1, c.S2)
+		fmt.Fprintf(&b, "h1=%s\nh2=%s\nh3=%s\nh4=%s\n", c.H1, c.H2, c.H3, c.H4)
+	}
 	fmt.Fprintf(&b, "public_key=%s\n", pub)
 	if c.PresharedKey != "" {
 		psk, err := keyToHex(c.PresharedKey)

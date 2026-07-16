@@ -26,7 +26,7 @@ import (
 
 const (
 	serviceName = "fortochka"
-	serviceDesc = "fortochka split-tunnel engine: WireGuard tunnel and per-app routing."
+	serviceDesc = "fortochka split-tunnel engine: AmneziaWG tunnel and per-app routing."
 )
 
 const errServiceAlreadyRunning = windows.Errno(1056)

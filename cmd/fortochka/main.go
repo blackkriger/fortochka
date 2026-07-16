@@ -96,13 +96,12 @@ type tray struct {
 	mApps    *systray.MenuItem
 	mAddSite *systray.MenuItem
 	mServer  *systray.MenuItem
-	mPAC    *systray.MenuItem
-	mSocks  *systray.MenuItem
+	mPAC     *systray.MenuItem
+	mSocks   *systray.MenuItem
 
-	mSvcInstall   *systray.MenuItem
-	mSvc          *systray.MenuItem
-	mSvcAuto      *systray.MenuItem
-	mSvcUninstall *systray.MenuItem
+	mSvcInstall *systray.MenuItem
+	mSvc        *systray.MenuItem
+	mSvcAuto    *systray.MenuItem
 
 	mu        sync.Mutex
 	cur       ipc.Status
@@ -127,9 +126,9 @@ func (t *tray) onReady() {
 	}()
 	systray.AddSeparator()
 
-	t.mImport = systray.AddMenuItem("Import WG config…", "Load a WireGuard .conf file")
+	t.mImport = systray.AddMenuItem("Import AmneziaWG config…", "Load an AmneziaWG .conf file")
 	mInfo := systray.AddMenuItem("Connection info", "Local endpoints")
-	t.mServer = mInfo.AddSubMenuItem("Server:  —", "WireGuard server endpoint")
+	t.mServer = mInfo.AddSubMenuItem("Server:  —", "AmneziaWG server endpoint")
 	t.mServer.Disable()
 	t.mPAC = mInfo.AddSubMenuItem("PAC:  —", "System proxy auto-config URL")
 	t.mPAC.Disable()
@@ -142,9 +141,8 @@ func (t *tray) onReady() {
 
 	mService := systray.AddMenuItem("Service", "Background service control")
 	t.mSvcInstall = mService.AddSubMenuItem("Install service", "Install the background engine (asks for admin)")
-	t.mSvc = mService.AddSubMenuItem("Service: …", "Start or stop the background engine")
+	t.mSvc = mService.AddSubMenuItem("Service: …", "Turn fortochka fully off — stop and remove the engine")
 	t.mSvcAuto = mService.AddSubMenuItemCheckbox("Start with Windows", "Start the engine service at boot", false)
-	t.mSvcUninstall = mService.AddSubMenuItem("Uninstall service", "Remove the engine service (asks for admin)")
 	t.mSvcInstall.Hide()
 
 	mMore := systray.AddMenuItem("More", "Folder and logs")
@@ -171,8 +169,6 @@ func (t *tray) onReady() {
 				t.toggleService()
 			case <-t.mSvcAuto.ClickedCh:
 				t.toggleServiceAutostart()
-			case <-t.mSvcUninstall.ClickedCh:
-				t.uninstallEngine()
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
@@ -204,24 +200,22 @@ func (t *tray) watchStatus() {
 	}
 }
 
-// updateEngineMenu shows "Install service" when absent, else Service/autostart/Uninstall; autostart is disabled while stopped since only the running service can toggle it.
+// updateEngineMenu shows "Install service" when absent, else the on/off toggle and autostart; autostart is disabled while stopped since only the running service can toggle it.
 func (t *tray) updateEngineMenu(running bool) {
 	if !serviceInstalled() {
 		t.mSvcInstall.Show()
 		t.mSvc.Hide()
 		t.mSvcAuto.Hide()
-		t.mSvcUninstall.Hide()
 		return
 	}
 	t.mSvcInstall.Hide()
 	t.mSvc.Show()
 	t.mSvcAuto.Show()
-	t.mSvcUninstall.Show()
 	if running {
-		t.mSvc.SetTitle("Service: running — click to stop")
+		t.mSvc.SetTitle("fortochka is on — click to turn off")
 		t.mSvcAuto.Enable()
 	} else {
-		t.mSvc.SetTitle("Service: stopped — click to start")
+		t.mSvc.SetTitle("fortochka is off — click to turn on")
 		t.mSvcAuto.Disable()
 	}
 }
@@ -281,6 +275,9 @@ func (t *tray) syncProxy(st ipc.Status) {
 	}
 }
 
+// hiddenApps never appear in the route-through-tunnel list: Discord is pinned direct in the engine, so offering to tunnel it would only mislead.
+var hiddenApps = map[string]bool{"discord.exe": true}
+
 // syncApps keeps the "Route app through tunnel" submenu in step with the engine, listing running and selected apps and reflecting which are routed.
 func (t *tray) syncApps(st ipc.Status) {
 	selected := map[string]bool{}
@@ -295,7 +292,7 @@ func (t *tray) syncApps(st ipc.Status) {
 		set[a] = true
 	}
 	for _, name := range sortedKeys(set) {
-		if name == "" || name == t.selfExe {
+		if name == "" || name == t.selfExe || hiddenApps[name] {
 			continue
 		}
 		t.ensureAppItem(name, selected[name])
@@ -372,7 +369,7 @@ func (t *tray) toggleTunnel() {
 }
 
 func (t *tray) importConfig() {
-	path, err := filedialog.Open("Select WireGuard config")
+	path, err := filedialog.Open("Select AmneziaWG config")
 	if err != nil {
 		log.Printf("import: dialog: %v", err)
 		return
@@ -394,6 +391,7 @@ func (t *tray) importConfig() {
 }
 
 // toggleService starts or stops the background engine via the SCM using the start/stop right granted at install (no UAC); no-op if the service isn't installed.
+// toggleService turns fortochka fully off — it clears the system proxy, then removes the service, our WinDivert driver and the firewall rule, and closes the tray, so no fortochka process is left running. The imported config is kept, so relaunching the exe brings everything back.
 func (t *tray) toggleService() {
 	if !serviceInstalled() {
 		log.Printf("tray: service not installed — install it first")
@@ -403,11 +401,13 @@ func (t *tray) toggleService() {
 	up := t.serviceUp
 	t.mu.Unlock()
 	if up {
-		if err := stopEngineService(); err != nil {
-			log.Printf("tray: stop service: %v", err)
-		} else {
-			log.Printf("tray: engine service stopping")
-		}
+		_ = sysproxy.Disable() // drop the PAC before the engine goes away so HTTP isn't left pointing at a dead proxy
+		t.mu.Lock()
+		t.proxyOn = false
+		t.mu.Unlock()
+		log.Printf("tray: turning fortochka off — removing service and closing tray")
+		launchElevated("-uninstall")
+		systray.Quit()
 		return
 	}
 	if err := startEngineService(); err != nil {
@@ -440,11 +440,6 @@ func (t *tray) toggleServiceAutostart() {
 func (t *tray) installEngine() {
 	log.Printf("tray: installing engine service (elevation)")
 	launchElevated("-install")
-}
-
-func (t *tray) uninstallEngine() {
-	log.Printf("tray: uninstalling engine service (elevation)")
-	launchElevated("-uninstall")
 }
 
 func (t *tray) setOffline() {
