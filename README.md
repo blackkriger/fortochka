@@ -4,14 +4,14 @@
 
 # fortochka
 
-Выборочный split-туннель для Windows поверх **твоего** WireGuard. Заблокированные сайты и выбранные приложения идут **через** туннель, всё остальное — напрямую.
+Выборочный split-туннель для Windows поверх **твоего** AmneziaWG. Заблокированные сайты и выбранные приложения идут **через** туннель, всё остальное — напрямую. 
 
 ## Что это
 
 fortochka живёт в системном трее и состоит из двух частей:
 
-- **Движок** — служба Windows (LocalSystem): userspace-туннель WireGuard, локальный SOCKS5/HTTP-прокси + PAC, правила маршрутизации и перехват по приложениям (WinDivert).
-- **Трей** — маленькое меню без прав администратора, общается с движком через локальный named pipe.
+- **Движок** — служба Windows (LocalSystem): userspace-туннель awg, локальный SOCKS5/HTTP-прокси + PAC, правила маршрутизации и перехват по приложениям (WinDivert).
+- **Трей** — маленькое меню без прав администратора, общается с движком по локальному пути. 
 
 Служба работает в фоне и стартует с Windows; трей можно закрыть — движок продолжит работать.
 
@@ -20,7 +20,7 @@ fortochka живёт в системном трее и состоит из дв�
 ```
 Telegram ────SOCKS5───┐
 Browser  ─────PAC─────┼─→ proxy → rules ─ direct → OZON, LAN, …
-claude.exe ─WinDivert─┘                  └ wg → your server → blocked sites
+claude.exe ─WinDivert─┘                  └ awg → blocked sites 
 ```
 
 - **Правила решают по каждому адресу: напрямую или в туннель.** Заблокированные домены/IP (автоматически подтягиваются списки [Re:filter](https://github.com/1andrevich/Re-filter-lists)), плюсом твой список, идут через WG; остальное — напрямую. 
@@ -30,7 +30,7 @@ claude.exe ─WinDivert─┘                  └ wg → your server → blocke
 ## Установка
 
 1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится иконка **f**
-2. Трей → **Import WG config…** → выбери свой WireGuard `.conf` 
+2. Трей → **Import AmneziaWG config…** → выбери свой awg `.conf` 
 
 ## Меню в трее
 
@@ -38,7 +38,7 @@ claude.exe ─WinDivert─┘                  └ wg → your server → blocke
 Connected                      статус: Disconnected / Connecting… / No config imported / Engine off
 Disconnect                     подключить / отключить туннель
 ───
-Import WG config…
+Import AmneziaWG config…
 Connection info ▸              адреса Server / PAC / SOCKS5
 ───
 Route address through tunnel…  редактировать список доменов/IP для туннеля
