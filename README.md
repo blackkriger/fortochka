@@ -29,7 +29,7 @@ claude.exe ─WinDivert─┘                  └ awg → blocked sites
 
 ## Установка
 
-1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится иконка **f**
+1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится **f** меню
 2. Трей → **Import AmneziaWG config…** → выбери свой awg `.conf` 
 
 ## Меню в трее
@@ -43,9 +43,8 @@ Connection info ▸              адреса Server / PAC / SOCKS5
 ───
 Route address through tunnel…  редактировать список доменов/IP для туннеля
 Route app through tunnel ▸     отметить приложения — весь их трафик в туннель
-Service ▸                      старт/стоп службы
+Service ▸                      Install service — поставить движок, либо «fortochka on — click to turn off» (стоп + удаление)
                                Start with Windows — автозапуск с системой
-                               Uninstall — удалить службу
 More ▸                         Open program folder — папка данных
                                Show / hide log — окно логов
 ───
@@ -63,8 +62,11 @@ Quit                           закрыть трей (движок продо�
 - домены — `claude.ai` (и поддомены тоже)
 - IP / CIDR — `198.51.100.7`, `203.0.113.0/24`
 - полный URL / host:port — `http://198.51.100.7:8082/` (схема, порт и путь отбрасываются)
+- префикс `!` — принудительно **напрямую**, мимо туннеля, даже если адрес есть в блок-листе 
 
 Сохранение подхватывается на лету — подходящие соединения сразу переезжают на новый маршрут.
+
+Домены дискорда в сборке зафиксированы напрямую (через туннель у них тормозит войс) — если провайдер их режет, можно в паре использовать DPI-обход.
 
 ## Сборка
 
@@ -75,4 +77,4 @@ Quit                           закрыть трей (движок продо�
 
 Требуется Go (см. `go.mod`) и Windows. `WinDivert.dll` + `WinDivert64.sys` вшиваются из `internal/windivert/bin` в exe и распаковываются в `C:\ProgramData\fortochka` в рантайме — на выходе должен быть один файл.
 
-Перехват пакетов работает на [WinDivert](https://github.com/basil00/WinDivert).
+Перехват пакетов работает на [WinDivert](https://github.com/basil00/WinDivert). Туннель AmneziaWG — на [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go).
