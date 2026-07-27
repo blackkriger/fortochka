@@ -20,7 +20,7 @@ fortochka живёт в системном трее и состоит из дв�
 ```
 Telegram ────SOCKS5───┐
 Browser  ─────PAC─────┼─→ proxy → rules ─ direct → OZON, LAN, …
-claude.exe ─WinDivert─┘                  └ awg → blocked sites 
+claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites 
 ```
 
 - **Правила решают по каждому адресу: напрямую или в туннель.** Заблокированные домены/IP (автоматически подтягиваются списки [Re:filter](https://github.com/1andrevich/Re-filter-lists)), плюсом твой список, идут через WG; остальное — напрямую. 

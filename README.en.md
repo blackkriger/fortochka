@@ -20,7 +20,7 @@ The engine runs in the background and starts with Windows by default.
 ```
 Telegram ────SOCKS5───┐
 Browser  ─────PAC─────┼─→ proxy → rules ─ direct → OZON, LAN, …
-claude.exe ─WinDivert─┘                  └ awg → your server → blocked sites
+claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites 
 ```
 
 - **Rules decide direct vs tunnel per destination.** Blocked domains/IPs (auto-fetched [Re:filter](https://github.com/1andrevich/Re-filter-lists) lists) plus your own list go through the tunnel; the default is direct.
