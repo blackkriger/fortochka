@@ -4,13 +4,13 @@
 
 # fortochka
 
-Selective split-tunnel for Windows over **your own** AmneziaWG connection. Blocked sites and chosen apps go **through** the tunnel; everything else stays on the direct connection. 
+Selective split-tunnel for Windows over **your own** WireGuard or AmneziaWG connection. Blocked sites and chosen apps go **through** the tunnel; everything else stays on the direct connection. 
 
 ## What it is
 
 fortochka lives in the system tray and splits into two parts:
 
-- **Engine** — a Windows service (LocalSystem) that runs a userspace AmneziaWG tunnel, a local SOCKS5/HTTP proxy + PAC, the routing rules, and per-app interception (WinDivert).
+- **Engine** — a Windows service (LocalSystem) that runs a userspace WireGuard/AmneziaWG tunnel, a local SOCKS5/HTTP proxy + PAC, the routing rules, and per-app interception (WinDivert).
 - **Tray** — a small, non-elevated UI that talks to the engine over a local named pipe.
 
 The engine runs in the background and starts with Windows by default. 
@@ -30,7 +30,7 @@ claude.exe ─WinDivert─┘                  └ awg → your server → block
 ## Install
 
 1. Download the [latest release](https://github.com/blackkriger/fortochka/releases/latest) and run `fortochka.exe`. On first launch it installs the engine service and enables Start with Windows (a one-time admin prompt); the `f` menu will appear in the tray.
-2. Tray → **Import AmneziaWG config…** → pick your AmneziaWG `.conf`
+2. Tray → **Import tunnel config…** → pick your WireGuard or AmneziaWG `.conf`
 
 ## The tray menu
 
@@ -38,7 +38,7 @@ claude.exe ─WinDivert─┘                  └ awg → your server → block
 <status>                       Disconnected / Connecting… / No config imported / Engine off
 Connect / Disconnect           connect / disconnect the tunnel
 ───
-Import AmneziaWG config…
+Import tunnel config…
 Connection info ▸              Server / PAC / SOCKS5 addresses
 ───
 Route address through tunnel…  edit the routed domain/IP list

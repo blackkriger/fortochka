@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"fyne.io/systray"
 
@@ -126,9 +127,9 @@ func (t *tray) onReady() {
 	}()
 	systray.AddSeparator()
 
-	t.mImport = systray.AddMenuItem("Import AmneziaWG config…", "Load an AmneziaWG .conf file")
+	t.mImport = systray.AddMenuItem("Import tunnel config…", "Load a WireGuard or AmneziaWG .conf file")
 	mInfo := systray.AddMenuItem("Connection info", "Local endpoints")
-	t.mServer = mInfo.AddSubMenuItem("Server:  —", "AmneziaWG server endpoint")
+	t.mServer = mInfo.AddSubMenuItem("Server:  —", "Tunnel server endpoint")
 	t.mServer.Disable()
 	t.mPAC = mInfo.AddSubMenuItem("PAC:  —", "System proxy auto-config URL")
 	t.mPAC.Disable()
@@ -295,7 +296,7 @@ func (t *tray) syncApps(st ipc.Status) {
 		if name == "" || name == t.selfExe || hiddenApps[name] {
 			continue
 		}
-		t.ensureAppItem(name, selected[name])
+		t.ensureAppItem(name, appDisplay(st, name), selected[name])
 	}
 
 	t.mu.Lock()
@@ -305,21 +306,26 @@ func (t *tray) syncApps(st ipc.Status) {
 	}
 	t.mu.Unlock()
 	for name, item := range items {
-		if selected[name] {
-			item.Check()
+		if set[name] {
+			item.Show()
+			if selected[name] {
+				item.Check()
+			} else {
+				item.Uncheck()
+			}
 		} else {
-			item.Uncheck()
+			item.Hide()
 		}
 	}
 }
 
-func (t *tray) ensureAppItem(name string, checked bool) {
+func (t *tray) ensureAppItem(name, display string, checked bool) {
 	t.mu.Lock()
 	if _, ok := t.appItems[name]; ok {
 		t.mu.Unlock()
 		return
 	}
-	item := t.mApps.AddSubMenuItemCheckbox(name, "Route "+name+" through the tunnel", checked)
+	item := t.mApps.AddSubMenuItemCheckbox(display, "Route "+display+" through the tunnel", checked)
 	t.appItems[name] = item
 	t.mu.Unlock()
 	go func() {
@@ -327,6 +333,20 @@ func (t *tray) ensureAppItem(name string, checked bool) {
 			t.toggleApp(name)
 		}
 	}()
+}
+
+// appDisplay picks a friendly label for an exe name: the engine's resolved name, else a prettified fallback.
+func appDisplay(st ipc.Status, name string) string {
+	if d := st.AppNames[name]; d != "" {
+		return d
+	}
+	n := strings.TrimSuffix(name, ".exe")
+	if n == "" {
+		return name
+	}
+	r := []rune(n)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 func (t *tray) toggleApp(name string) {
@@ -369,7 +389,7 @@ func (t *tray) toggleTunnel() {
 }
 
 func (t *tray) importConfig() {
-	path, err := filedialog.Open("Select AmneziaWG config")
+	path, err := filedialog.Open("Select WireGuard or AmneziaWG config")
 	if err != nil {
 		log.Printf("import: dialog: %v", err)
 		return

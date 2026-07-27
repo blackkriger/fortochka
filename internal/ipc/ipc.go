@@ -45,15 +45,16 @@ type Response struct {
 
 // Status is the full engine snapshot the tray renders from.
 type Status struct {
-	State        string   `json:"state"`
-	Endpoint     string   `json:"endpoint"`
-	HasConfig    bool     `json:"has_config"`
-	TunnelWanted bool     `json:"tunnel_wanted"`
-	Apps         []string `json:"apps"`
-	RunningApps  []string `json:"running_apps"`
-	PACURL       string   `json:"pac_url"`      // for the tray's per-user system proxy
-	ProxyAddr    string   `json:"proxy_addr"`   // SOCKS5/HTTP mixed proxy address
-	AutostartOn  bool     `json:"autostart_on"` // service SCM StartType == Automatic
+	State        string            `json:"state"`
+	Endpoint     string            `json:"endpoint"`
+	HasConfig    bool              `json:"has_config"`
+	TunnelWanted bool              `json:"tunnel_wanted"`
+	Apps         []string          `json:"apps"`
+	RunningApps  []string          `json:"running_apps"`
+	AppNames     map[string]string `json:"app_names,omitempty"` // exe base name → display name
+	PACURL       string            `json:"pac_url"`             // for the tray's per-user system proxy
+	ProxyAddr    string            `json:"proxy_addr"`          // SOCKS5/HTTP mixed proxy address
+	AutostartOn  bool              `json:"autostart_on"`        // service SCM StartType == Automatic
 }
 
 // Handler processes one request and returns a response (server side).

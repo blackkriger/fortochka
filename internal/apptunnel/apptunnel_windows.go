@@ -215,6 +215,9 @@ func (e *Engine) Stop() {
 // RunningNetApps lists processes currently holding TCP connections — the useful candidates to route.
 func RunningNetApps() []string { return procnet.RunningTCPApps() }
 
+// RunningNetAppsNamed maps each candidate app's exe base name to a display name.
+func RunningNetAppsNamed() map[string]string { return procnet.RunningTCPAppsNamed() }
+
 func (e *Engine) resetAppConnections(names map[string]bool) {
 	if n := procnet.ResetAppTCP(names); n > 0 {
 		e.logf("apptunnel: reset %d existing connection(s) to re-route through the tunnel", n)

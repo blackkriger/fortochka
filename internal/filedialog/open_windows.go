@@ -53,7 +53,7 @@ func Open(title string) (string, error) {
 	defer runtime.UnlockOSThread()
 
 	buf := make([]uint16, 1024)
-	filter := utf16List("AmneziaWG config (*.conf)", "*.conf", "All files (*.*)", "*.*")
+	filter := utf16List("WireGuard / AmneziaWG config (*.conf)", "*.conf", "All files (*.*)", "*.*")
 
 	var ofn openfilenameW
 	ofn.lStructSize = uint32(unsafe.Sizeof(ofn))

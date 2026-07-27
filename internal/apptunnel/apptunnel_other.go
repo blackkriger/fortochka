@@ -19,3 +19,5 @@ func (e *Engine) SetApps(names []string) {}
 func (e *Engine) Stop()                  {}
 
 func RunningNetApps() []string { return nil }
+
+func RunningNetAppsNamed() map[string]string { return nil }

@@ -177,13 +177,20 @@ func (d *Daemon) Status() ipc.Status {
 	apps := sortedKeys(d.selApps)
 	wanted := d.tunnelWanted
 	d.mu.Unlock()
+	named := apptunnel.RunningNetAppsNamed()
+	running := make([]string, 0, len(named))
+	for k := range named {
+		running = append(running, k)
+	}
+	sort.Strings(running)
 	return ipc.Status{
 		State:        stateName(d.tunnel.State()),
 		Endpoint:     d.tunnel.Endpoint(),
 		HasConfig:    d.hasWGConfig(),
 		TunnelWanted: wanted,
 		Apps:         apps,
-		RunningApps:  apptunnel.RunningNetApps(),
+		RunningApps:  running,
+		AppNames:     named,
 		PACURL:       pac.URL(d.cfg.Listen.PAC),
 		ProxyAddr:    d.cfg.Listen.Proxy,
 	}

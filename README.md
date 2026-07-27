@@ -4,13 +4,13 @@
 
 # fortochka
 
-Выборочный split-туннель для Windows поверх **твоего** AmneziaWG. Заблокированные сайты и выбранные приложения идут **через** туннель, всё остальное — напрямую. 
+Выборочный split-туннель для Windows поверх **твоего** WireGuard или AmneziaWG. Заблокированные сайты и выбранные приложения идут **через** туннель, всё остальное — напрямую. 
 
 ## Что это
 
 fortochka живёт в системном трее и состоит из двух частей:
 
-- **Движок** — служба Windows (LocalSystem): userspace-туннель awg, локальный SOCKS5/HTTP-прокси + PAC, правила маршрутизации и перехват по приложениям (WinDivert).
+- **Движок** — служба Windows (LocalSystem): userspace-туннель wg/awg, локальный SOCKS5/HTTP-прокси + PAC, правила маршрутизации и перехват по приложениям (WinDivert).
 - **Трей** — маленькое меню без прав администратора, общается с движком по локальному пути. 
 
 Служба работает в фоне и стартует с Windows; трей можно закрыть — движок продолжит работать.
@@ -30,7 +30,7 @@ claude.exe ─WinDivert─┘                  └ awg → blocked sites
 ## Установка
 
 1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится **f** меню
-2. Трей → **Import AmneziaWG config…** → выбери свой awg `.conf` 
+2. Трей → **Import tunnel config…** → выбери свой wg или awg `.conf` 
 
 ## Меню в трее
 
@@ -38,7 +38,7 @@ claude.exe ─WinDivert─┘                  └ awg → blocked sites
 Connected                      статус: Disconnected / Connecting… / No config imported / Engine off
 Disconnect                     подключить / отключить туннель
 ───
-Import AmneziaWG config…
+Import tunnel config…
 Connection info ▸              адреса Server / PAC / SOCKS5
 ───
 Route address through tunnel…  редактировать список доменов/IP для туннеля
