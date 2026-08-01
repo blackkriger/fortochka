@@ -66,7 +66,7 @@ Your custom list lives in `C:\ProgramData\fortochka\rules.txt` (Tray → **Route
 
 Saving reloads live and immediately re-routes matching connections.
 
-Discord domains are pinned direct in the build (they tunnel poorly — voice latency), so pair fortochka with a DPI-bypass tool if your ISP throttles them.
+Microsoft Store apps run inside the browser engine rather than as their own process, so they never appear in the app list — and routing the browser would route everything. Route them by address instead: for the Instagram app, `instagram.com` in the list is what sends it through the tunnel. 
 
 ## Build
 
