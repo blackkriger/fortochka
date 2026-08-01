@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fortochka/internal/rules"
@@ -31,9 +33,40 @@ type Server struct {
 	// ForceWG reports whether the process owning a client's local TCP port is a per-app-tunneled app; if so its proxied traffic goes through WG regardless of the rules. nil disables the check.
 	ForceWG func(localPort uint16) bool
 
+	// WGReady reports whether the tunnel can carry traffic; without it a reconnecting tunnel makes every routed request wait out the full dial timeout instead of failing so the browser can retry. nil disables the check.
+	WGReady func() bool
+
 	mu     sync.Mutex
 	active map[net.Conn]connRoute
+
+	st stats
 }
+
+// stats are cumulative counters for the periodic health line, so a long log can be read without following every connection.
+type stats struct {
+	wgConns     atomic.Uint64
+	directConns atomic.Uint64
+	wgFailed    atomic.Uint64
+	directFail  atomic.Uint64
+	forced      atomic.Uint64 // sent to WG because the owning process is per-app routed
+	wgUp        atomic.Int64
+	wgDown      atomic.Int64
+	directUp    atomic.Int64
+	directDown  atomic.Int64
+}
+
+// Summary returns a one-line snapshot of what the proxy has routed so far.
+func (s *Server) Summary() string {
+	s.mu.Lock()
+	live := len(s.active)
+	s.mu.Unlock()
+	return fmt.Sprintf("live=%d | wg conns=%d failed=%d %.1fMB up/%.1fMB down (forced=%d) | direct conns=%d failed=%d %.1fMB up/%.1fMB down",
+		live,
+		s.st.wgConns.Load(), s.st.wgFailed.Load(), mb(s.st.wgUp.Load()), mb(s.st.wgDown.Load()), s.st.forced.Load(),
+		s.st.directConns.Load(), s.st.directFail.Load(), mb(s.st.directUp.Load()), mb(s.st.directDown.Load()))
+}
+
+func mb(n int64) float64 { return float64(n) / (1024 * 1024) }
 
 type connRoute struct {
 	host   string
@@ -120,6 +153,14 @@ func (s *Server) forceWGFor(conn net.Conn) bool {
 	return s.ForceWG(uint16(ra.Port))
 }
 
+// dialTimeout shortens the wait while the tunnel is reconnecting: the client already got a success reply by this point, so refusing outright would look like a dropped connection and invite an immediate retry — a quick failure lets it back off normally instead of waiting out the full timeout.
+func (s *Server) dialTimeout(viaWG bool) time.Duration {
+	if viaWG && s.WGReady != nil && !s.WGReady() {
+		return 5 * time.Second // long enough to ride out a first handshake right after Connect, short enough not to look like a hang
+	}
+	return 20 * time.Second
+}
+
 func (s *Server) dialerFor(host string, forceWG bool) (Dialer, string) {
 	if forceWG || s.Engine.Decide(host) == rules.WG {
 		return s.WG, "wg"
@@ -130,18 +171,39 @@ func (s *Server) dialerFor(host string, forceWG bool) (Dialer, string) {
 func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
 	client.SetReadDeadline(time.Time{})
 	dialer, route := s.dialerFor(host, forceWG)
-	s.track(client, host, route == "wg", forceWG)
+	viaWG := route == "wg"
+	s.track(client, host, viaWG, forceWG)
 	defer s.untrack(client)
+	if viaWG {
+		s.st.wgConns.Add(1)
+		if forceWG {
+			s.st.forced.Add(1)
+		}
+	} else {
+		s.st.directConns.Add(1)
+	}
 	log.Printf("proxy: %s -> %s:%s via %s", client.RemoteAddr(), host, port, route)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.dialTimeout(viaWG))
 	defer cancel()
 	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
+		if viaWG {
+			s.st.wgFailed.Add(1)
+		} else {
+			s.st.directFail.Add(1)
+		}
 		log.Printf("proxy: dial %s:%s via %s failed: %v", host, port, route, err)
 		return
 	}
 	defer upstream.Close()
 	up, down := pipe(client, upstream)
+	if viaWG {
+		s.st.wgUp.Add(up)
+		s.st.wgDown.Add(down)
+	} else {
+		s.st.directUp.Add(up)
+		s.st.directDown.Add(down)
+	}
 	log.Printf("proxy: %s:%s via %s closed (%d up / %d down bytes)", host, port, route, up, down)
 }
 
@@ -261,10 +323,21 @@ func (s *Server) forwardHTTP(conn net.Conn, req *http.Request, forceWG bool) boo
 	defer s.untrack(conn)
 	log.Printf("proxy: %s -> %s:%s via %s (http %s)", conn.RemoteAddr(), host, port, route, req.Method)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	viaWG := route == "wg"
+	if viaWG {
+		s.st.wgConns.Add(1)
+	} else {
+		s.st.directConns.Add(1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.dialTimeout(viaWG))
 	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	cancel()
 	if err != nil {
+		if viaWG {
+			s.st.wgFailed.Add(1)
+		} else {
+			s.st.directFail.Add(1)
+		}
 		log.Printf("proxy: dial %s:%s via %s failed: %v", host, port, route, err)
 		return false
 	}
