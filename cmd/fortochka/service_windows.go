@@ -4,11 +4,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,18 +92,72 @@ func runService() {
 	}
 }
 
-func setupServiceLogging(dir string) *os.File {
+const (
+	maxLogSize  = 20 * 1024 * 1024
+	maxLogFiles = 2 // fortochka.log.1 and .2, so a day of history survives without unbounded growth
+)
+
+// rotatingLog keeps the log bounded while the service runs. Rotating only at startup was not enough: the service is meant to run for weeks, so the file grew until someone restarted it.
+type rotatingLog struct {
+	mu   sync.Mutex
+	path string
+	f    *os.File
+	size int64
+}
+
+func (w *rotatingLog) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.f == nil {
+		return len(p), nil // pretend success: a logging problem must never break the engine
+	}
+	if w.size+int64(len(p)) > maxLogSize {
+		w.rotate()
+	}
+	n, err := w.f.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotatingLog) rotate() {
+	w.f.Close()
+	for i := maxLogFiles; i >= 1; i-- {
+		older := fmt.Sprintf("%s.%d", w.path, i)
+		if i == maxLogFiles {
+			_ = os.Remove(older)
+			continue
+		}
+		_ = os.Rename(older, fmt.Sprintf("%s.%d", w.path, i+1))
+	}
+	_ = os.Rename(w.path, w.path+".1")
+	w.f, w.size = nil, 0
+	if f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		w.f = f
+	}
+}
+
+func (w *rotatingLog) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.f == nil {
+		return nil
+	}
+	return w.f.Close()
+}
+
+func setupServiceLogging(dir string) io.Closer {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 	path := filepath.Join(dir, "fortochka.log")
-	if fi, err := os.Stat(path); err == nil && fi.Size() > 10*1024*1024 {
-		_ = os.Rename(path, path+".1")
-	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil
 	}
-	log.SetOutput(f)
-	return f
+	w := &rotatingLog{path: path, f: f}
+	if fi, err := f.Stat(); err == nil {
+		w.size = fi.Size()
+	}
+	log.SetOutput(w)
+	return w
 }
 
 func loadServiceConfig(dir string) *config.Config {
