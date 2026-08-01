@@ -182,7 +182,10 @@ func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
 	} else {
 		s.st.directConns.Add(1)
 	}
-	log.Printf("proxy: %s -> %s:%s via %s", client.RemoteAddr(), host, port, route)
+	// Only tunnelled connections are logged per-connection: direct ones are the bulk of the traffic and would bury the log, and the health line already reports their totals.
+	if viaWG {
+		log.Printf("proxy: %s -> %s:%s via wg", client.RemoteAddr(), host, port)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.dialTimeout(viaWG))
 	defer cancel()
 	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
@@ -204,7 +207,9 @@ func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
 		s.st.directUp.Add(up)
 		s.st.directDown.Add(down)
 	}
-	log.Printf("proxy: %s:%s via %s closed (%d up / %d down bytes)", host, port, route, up, down)
+	if viaWG {
+		log.Printf("proxy: %s:%s via wg closed (%d up / %d down bytes)", host, port, up, down)
+	}
 }
 
 func pipe(client, upstream net.Conn) (up, down int64) {
@@ -321,9 +326,10 @@ func (s *Server) forwardHTTP(conn net.Conn, req *http.Request, forceWG bool) boo
 	dialer, route := s.dialerFor(host, forceWG)
 	s.track(conn, host, route == "wg", forceWG)
 	defer s.untrack(conn)
-	log.Printf("proxy: %s -> %s:%s via %s (http %s)", conn.RemoteAddr(), host, port, route, req.Method)
-
 	viaWG := route == "wg"
+	if viaWG {
+		log.Printf("proxy: %s -> %s:%s via wg (http %s)", conn.RemoteAddr(), host, port, req.Method)
+	}
 	if viaWG {
 		s.st.wgConns.Add(1)
 	} else {
