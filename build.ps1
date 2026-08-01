@@ -5,7 +5,7 @@ param([switch]$Resources)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = "0.4.0"
+$version = "0.4.1"
 
 if ($Resources) {
   pwsh -NoProfile -File .\tools\genicons.ps1 -OutDir "cmd\fortochka"
