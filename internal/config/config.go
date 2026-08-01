@@ -83,7 +83,7 @@ func (c *Config) applyDefaults() {
 	if c.WG.DNS == "" {
 		c.WG.DNS = "1.1.1.1"
 	}
-	if c.Lists.Refresh == 0 {
+	if c.Lists.Refresh <= 0 { // a negative interval in yaml would panic NewTicker and take the service down
 		c.Lists.Refresh = 6 * time.Hour
 	}
 	if c.Lists.DefaultAction == "" {

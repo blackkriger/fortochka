@@ -70,12 +70,20 @@ func fetch(ctx context.Context, src Source) ([]rules.Rule, error) {
 	return out, nil
 }
 
+// client bounds the handshake and header wait so a server that accepts and then stalls can't wedge the refresh loop for the process lifetime, while a slow but progressing multi-MB download is left alone.
+var client = &http.Client{Transport: &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	ForceAttemptHTTP2:     true,
+	TLSHandshakeTimeout:   30 * time.Second,
+	ResponseHeaderTimeout: 60 * time.Second,
+}}
+
 func download(ctx context.Context, url string) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
