@@ -40,6 +40,7 @@ type Device struct {
 	dev     *device.Device
 	net     *netstack.Net
 	hsFails atomic.Int32 // consecutive failed re-handshakes; a dying tunnel
+	lastHS  atomic.Int64 // last handshake timestamp seen, so a completed one can clear the streak
 }
 
 func New(c Config) (*Device, error) {
@@ -114,9 +115,6 @@ func (d *Device) Close() error {
 
 // HandshakeOK reports whether the peer handshake is recent enough that the tunnel is actually live (a stale handshake means the session has died).
 func (d *Device) HandshakeOK() bool {
-	if d.hsFails.Load() >= 3 {
-		return false
-	}
 	cfg, err := d.dev.IpcGet()
 	if err != nil {
 		return false
@@ -125,6 +123,13 @@ func (d *Device) HandshakeOK() bool {
 		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
 			sec, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 			if err != nil || sec == 0 {
+				return false
+			}
+			// A handshake that actually completed clears the failure streak. Without this a tunnel revived by a peer-initiated rekey stays "failing" forever — that path never logs the line the counter watches — and the supervisor eventually tears down a working tunnel.
+			if sec > d.lastHS.Swap(sec) {
+				d.hsFails.Store(0)
+			}
+			if d.hsFails.Load() >= 3 {
 				return false
 			}
 			return time.Now().Unix()-sec < handshakeStaleAfter
