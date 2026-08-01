@@ -8,4 +8,6 @@ var errUnsupported = errors.New("sysproxy: automatic system proxy is only implem
 
 func Enable(pacURL string) error { return errUnsupported }
 
+func Current() string { return "" }
+
 func Disable() error { return errUnsupported }

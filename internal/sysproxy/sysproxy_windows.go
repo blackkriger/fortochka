@@ -30,6 +30,20 @@ func Enable(pacURL string) error {
 	return nil
 }
 
+// Current returns the PAC URL the system is configured with, or "" if none.
+func Current() string {
+	key, err := registry.OpenKey(registry.CURRENT_USER, settingsPath, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer key.Close()
+	v, _, err := key.GetStringValue("AutoConfigURL")
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
 // Disable removes the PAC URL, restoring the previous (direct) configuration.
 func Disable() error {
 	key, err := registry.OpenKey(registry.CURRENT_USER, settingsPath, registry.SET_VALUE)
