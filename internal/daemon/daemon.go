@@ -40,6 +40,9 @@ type Daemon struct {
 	cancel  context.CancelFunc
 
 	statePath string
+	pacOK     bool // false when the PAC port could not be bound, so the tray is not told to point the system at it
+
+	applyMu sync.Mutex // serializes reconcile and state writes so a stale snapshot can't be applied after a newer one
 
 	mu           sync.Mutex
 	tunnelWanted bool
@@ -78,7 +81,9 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
 
-	server := &proxy.Server{Engine: engine, Direct: &net.Dialer{}, WG: d.tunnel, ForceWG: d.forceWGForPort}
+	tunnelReady := func() bool { return d.tunnel.State() == wg.Connected }
+	// WGReady is set here, not after Serve starts: assigning it later would be a data race with the accept goroutines.
+	server := &proxy.Server{Engine: engine, Direct: &net.Dialer{}, WG: d.tunnel, ForceWG: d.forceWGForPort, WGReady: tunnelReady}
 
 	rulesPath := userrules.Path(dir)
 	if err := userrules.EnsureDefault(rulesPath); err != nil {
@@ -115,15 +120,32 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 		}
 	}()
 
-	d.pacSrv = &http.Server{Addr: cfg.Listen.PAC, Handler: pac.Handler(cfg.Listen.Proxy, discordDomains)}
-	go func() {
-		if err := d.pacSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("pac: %v", err)
-		}
-	}()
+	// Bind up front so the tray is never handed a PAC URL nothing is serving, but a failure here only costs the PAC — the proxy and tunnel still work, so it must not take the whole engine down.
+	if pacLn, err := net.Listen("tcp", cfg.Listen.PAC); err != nil {
+		log.Printf("pac: listen %s failed (%v) — browser auto-config is off, per-app routing and the proxy still work", cfg.Listen.PAC, err)
+	} else {
+		d.pacOK = true
+		d.pacSrv = &http.Server{Handler: pac.Handler(cfg.Listen.Proxy, discordDomains)}
+		go func() {
+			if err := d.pacSrv.Serve(pacLn); err != nil && err != http.ErrServerClosed {
+				log.Printf("pac: %v", err)
+			}
+		}()
+	}
 
 	d.apps = apptunnel.New(d.tunnel, log.Printf)
-	log.Printf("fortochka engine up — proxy %s, pac %s", cfg.Listen.Proxy, pac.URL(cfg.Listen.PAC))
+	d.apps.Ready = tunnelReady // safe here: nothing reads the engine until SetApps
+	go d.heartbeat(ctx, server)
+	go func() { // netsh can take seconds; doing it inline would delay the service reporting Running to the SCM
+		if err := apptunnel.EnsureFirewallRule(); err != nil {
+			log.Printf("apptunnel: firewall rule failed (%v) — per-app routing will not work until this is fixed", err)
+		}
+	}()
+	pacInfo := "off (bind failed)"
+	if d.pacOK {
+		pacInfo = pac.URL(cfg.Listen.PAC)
+	}
+	log.Printf("fortochka engine up — proxy %s, pac %s", cfg.Listen.Proxy, pacInfo)
 
 	if d.tunnelWanted {
 		if c, ok := d.loadWGConfig(); ok {
@@ -177,6 +199,10 @@ func (d *Daemon) Status() ipc.Status {
 	apps := sortedKeys(d.selApps)
 	wanted := d.tunnelWanted
 	d.mu.Unlock()
+	pacURL := ""
+	if d.pacOK {
+		pacURL = pac.URL(d.cfg.Listen.PAC)
+	}
 	named := apptunnel.RunningNetAppsNamed()
 	running := make([]string, 0, len(named))
 	for k := range named {
@@ -191,7 +217,7 @@ func (d *Daemon) Status() ipc.Status {
 		Apps:         apps,
 		RunningApps:  running,
 		AppNames:     named,
-		PACURL:       pac.URL(d.cfg.Listen.PAC),
+		PACURL:       pacURL,
 		ProxyAddr:    d.cfg.Listen.Proxy,
 	}
 }
@@ -264,7 +290,7 @@ func (d *Daemon) Close() {
 		d.cancel()
 	}
 	if d.apps != nil {
-		d.apps.Stop()
+		d.apps.Stop() // the firewall rule is left in place: it is persistent and harmless, and removing it here would make every restart depend on re-adding it
 	}
 	if d.pacSrv != nil {
 		d.pacSrv.Close()
@@ -395,19 +421,58 @@ func (d *Daemon) appNameForPort(port uint16) string {
 	return name
 }
 
+// heartbeat writes one health line a minute so a long unattended run can be read back: what the tunnel was doing, which apps were intercepted, and how much went each way.
+func (d *Daemon) heartbeat(ctx context.Context, server *proxy.Server) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			d.mu.Lock()
+			apps := sortedKeys(d.selApps)
+			wanted := d.tunnelWanted
+			d.mu.Unlock()
+			log.Printf("health: tunnel=%s wanted=%v endpoint=%s | apps selected=%v intercepting=%v | proxy %s",
+				stateName(d.tunnel.State()), wanted, dash(d.tunnel.Endpoint()), apps, d.apps.Active(), server.Summary())
+		}
+	}
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
 func (d *Daemon) reconcile() {
-	connected := d.tunnel.State() == wg.Connected
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	state := d.tunnel.State()
 	d.mu.Lock()
 	apps := sortedKeys(d.selApps)
 	d.mu.Unlock()
-	if connected && len(apps) > 0 {
+	switch {
+	case len(apps) == 0:
+		d.apps.SetApps(nil) // the user cleared the selection
+	case state == wg.Disconnected:
+		log.Printf("apptunnel: pausing %v (tunnel down)", apps)
+		d.apps.Suspend() // pause without forgetting, so recovery isn't treated as a fresh selection
+	case state == wg.Connected || d.apps.Active():
+		// Keep intercepting through a reconnect: tearing it down mid-flap would send the apps direct (a leak) and force a reset of every one of their connections when the tunnel returns.
+		log.Printf("apptunnel: applying %v (tunnel %s)", apps, stateName(state))
 		d.apps.SetApps(apps)
-	} else {
-		d.apps.SetApps(nil)
+	default:
+		// Paused and still only reconnecting: resuming now would reset every connection into a tunnel that cannot carry them yet.
+		log.Printf("apptunnel: staying paused for %v until the tunnel is up", apps)
 	}
 }
 
 func (d *Daemon) persist() {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
 	d.mu.Lock()
 	s := appstate.State{TunnelWanted: d.tunnelWanted, TunnelApps: sortedKeys(d.selApps)}
 	d.mu.Unlock()
@@ -488,7 +553,7 @@ func manualRules(in []config.Rule) []rules.Rule {
 	return out
 }
 
-// discordDomains are pinned direct: Discord tunnels poorly (voice latency), so it is left to a co-running DPI-bypass tool — hardcoded so no fetched block list can pull it back into the tunnel; kept in sync with zapret's Discord hostlist so no Discord domain leaks back through the proxy.
+// discordDomains are pinned direct so a fetched block list cannot drag Discord through the proxy by default — that path is slow for voice, and a co-running DPI-bypass tool handles it better. Ticking discord.exe in the tray still routes it: per-app interception sits below the proxy, so the pin only decides the default. Kept in sync with zapret's Discord hostlist.
 var discordDomains = []string{
 	"discord.com", "discord.gg", "discord.media", "discord.app", "discord.co",
 	"discord.design", "discord.dev", "discord.gift", "discord.gifts", "discord.new",

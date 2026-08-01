@@ -175,7 +175,7 @@ func doUninstall() error {
 		launchElevated("-uninstall")
 		return nil
 	}
-	uninstallService()      // clean stop (closes WinDivert, drops the firewall rule) then delete
+	uninstallService()      // clean stop (closes WinDivert) then delete
 	removeWinDivertDriver() // our leftover driver, only if nothing else still holds it
 	removeFirewallRule()    // belt-and-suspenders
 	_ = autostart.Disable() // tray Run key + any leftover scheduled task
