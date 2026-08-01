@@ -70,13 +70,14 @@ func (e *Engine) SetList(r []Rule) {
 	e.rebuild()
 }
 
+// rebuild compiles and publishes under mu so a slow rebuild can't publish its stale snapshot after a newer one.
 func (e *Engine) rebuild() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	all := make([]Rule, 0, len(e.manual)+len(e.list))
 	all = append(all, e.manual...) // manual first → wins on suffix map overwrite order
 	all = append(all, e.list...)
 	def := e.def
-	e.mu.Unlock()
 
 	c := &compiled{suffixes: make(map[string]Action), def: def}
 	for _, r := range all {
