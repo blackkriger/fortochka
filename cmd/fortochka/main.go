@@ -4,6 +4,9 @@ import (
 	_ "embed"
 	"flag"
 	"log"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,12 +107,16 @@ type tray struct {
 	mSvc        *systray.MenuItem
 	mSvcAuto    *systray.MenuItem
 
-	mu        sync.Mutex
-	cur       ipc.Status
-	lastState string
-	proxyOn   bool
-	serviceUp bool
-	appItems  map[string]*systray.MenuItem
+	clickMu      sync.Mutex
+	menuMu       sync.Mutex
+	mu           sync.Mutex
+	cur          ipc.Status
+	lastState    string
+	proxyOn      bool
+	serviceUp    bool
+	offlineTicks int
+	appItems     map[string]*systray.MenuItem
+	lastAppsSig  string
 }
 
 func (t *tray) onReady() {
@@ -226,6 +233,7 @@ func (t *tray) apply(st ipc.Status) {
 	t.cur = st
 	t.lastState = st.State
 	t.serviceUp = true
+	t.offlineTicks = 0
 	t.mu.Unlock()
 
 	systray.SetIcon(iconForName(st.State))
@@ -262,22 +270,64 @@ func (t *tray) apply(st ipc.Status) {
 func (t *tray) syncProxy(st ipc.Status) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	want := st.State == ipc.StateConnected && st.PACURL != ""
+	// Keep the PAC through a reconnect: clearing it would drop the whole browser to direct, sending every routed domain out with the real IP, while leaving it makes those requests fail until the tunnel is back.
+	want := (st.State == ipc.StateConnected || st.State == ipc.StateConnecting) && st.PACURL != ""
+	cur := sysproxy.Current()
 	switch {
-	case want && !t.proxyOn:
+	case want && cur == st.PACURL:
+		t.proxyOn = true // already ours, e.g. left over from a previous run
+	case want:
 		if err := sysproxy.Enable(st.PACURL); err != nil {
 			log.Printf("tray: system proxy enable: %v", err)
 		} else {
 			t.proxyOn = true
 		}
-	case !want && t.proxyOn:
+	case cur != "" && (cur == st.PACURL || ourPAC(cur)):
+		log.Printf("tray: clearing system PAC %s (tunnel not connected)", cur)
 		_ = sysproxy.Disable()
 		t.proxyOn = false
 	}
 }
 
-// hiddenApps never appear in the route-through-tunnel list: Discord is pinned direct in the engine, so offering to tunnel it would only mislead.
-var hiddenApps = map[string]bool{"discord.exe": true}
+// ourPAC is the fallback for when the engine is unreachable and its exact URL is unknown: it matches the shape fortochka publishes on a local bind, so a PAC left behind by a killed tray is cleared while a corporate or remote one is left alone.
+func ourPAC(u string) bool {
+	p, err := url.Parse(u)
+	if err != nil || p.Path != "/proxy.pac" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(p.Host)
+	if err != nil {
+		host = p.Host
+	}
+	if host == "" || strings.EqualFold(host, "localhost") { // an empty host is the ":1081" bind form
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// appsSignature captures the visible app set and their checked state, so syncApps only rebuilds the menu when it actually changes — avoids the per-poll flicker.
+func appsSignature(set, selected map[string]bool, selfExe string) string {
+	names := make([]string, 0, len(set))
+	for n := range set {
+		if n == "" || n == selfExe {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var sb strings.Builder
+	for _, n := range names {
+		sb.WriteString(n)
+		if selected[n] {
+			sb.WriteByte('+')
+		} else {
+			sb.WriteByte('-')
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
 
 // syncApps keeps the "Route app through tunnel" submenu in step with the engine, listing running and selected apps and reflecting which are routed.
 func (t *tray) syncApps(st ipc.Status) {
@@ -292,8 +342,20 @@ func (t *tray) syncApps(st ipc.Status) {
 	for a := range selected {
 		set[a] = true
 	}
+
+	// menuMu covers compare-apply-publish as one step: publishing the signature first would let a slower goroutine apply stale checkboxes afterwards and then skip every later repair as "unchanged".
+	t.menuMu.Lock()
+	defer t.menuMu.Unlock()
+	sig := appsSignature(set, selected, t.selfExe)
+	t.mu.Lock()
+	unchanged := sig == t.lastAppsSig
+	t.mu.Unlock()
+	if unchanged {
+		return
+	}
+
 	for _, name := range sortedKeys(set) {
-		if name == "" || name == t.selfExe || hiddenApps[name] {
+		if name == "" || name == t.selfExe {
 			continue
 		}
 		t.ensureAppItem(name, appDisplay(st, name), selected[name])
@@ -317,6 +379,9 @@ func (t *tray) syncApps(st ipc.Status) {
 			item.Hide()
 		}
 	}
+	t.mu.Lock()
+	t.lastAppsSig = sig
+	t.mu.Unlock()
 }
 
 func (t *tray) ensureAppItem(name, display string, checked bool) {
@@ -349,7 +414,10 @@ func appDisplay(st ipc.Status, name string) string {
 	return string(r)
 }
 
+// clickMu serializes app toggles: each click reads the selection, flips one entry and sends the whole set, so two clicks racing across the IPC round trip would drop one of them.
 func (t *tray) toggleApp(name string) {
+	t.clickMu.Lock()
+	defer t.clickMu.Unlock()
 	t.mu.Lock()
 	sel := map[string]bool{}
 	for _, a := range t.cur.Apps {
@@ -466,9 +534,14 @@ func (t *tray) setOffline() {
 	t.mu.Lock()
 	t.lastState = ipc.StateDisconnected
 	t.serviceUp = false
-	if t.proxyOn {
-		_ = sysproxy.Disable()
-		t.proxyOn = false
+	// Only after several consecutive failures: one transient pipe error during a service restart should not drop the whole browser to direct.
+	t.offlineTicks++
+	if t.offlineTicks >= 3 {
+		if cur := sysproxy.Current(); cur != "" && (cur == t.cur.PACURL || ourPAC(cur)) {
+			log.Printf("tray: engine gone — clearing leftover system PAC %s", cur)
+			_ = sysproxy.Disable()
+			t.proxyOn = false
+		}
 	}
 	t.mu.Unlock()
 	systray.SetIcon(iconDisconnected)
