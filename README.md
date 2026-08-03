@@ -1,6 +1,4 @@
-<img src="cmd/fortochka/icon.png" width="64" align="right" alt="fortochka icon">
-
-[![en](https://img.shields.io/badge/lang-en-red)](README.en.md) [![ru](https://img.shields.io/badge/lang-ru-green)](README.md)
+[![en](https://img.shields.io/badge/lang-en-red)](README.en.md) [![ru](https://img.shields.io/badge/lang-ru-green)](README.md) <img src="cmd/fortochka/icon.png" width="64" align="right" alt="fortochka icon">
 
 # fortochka
 
@@ -29,7 +27,7 @@ claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites
 
 ## Установка
 
-1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора); в трее появится **f** меню
+1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора), а в трее появится **f** меню. 
 2. Трей → **Import tunnel config…** → выбери свой wg или awg `.conf` 
 
 ## Меню в трее

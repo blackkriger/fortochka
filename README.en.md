@@ -1,6 +1,4 @@
-<img src="cmd/fortochka/icon.png" width="64" align="right" alt="fortochka icon">
-
-[![en](https://img.shields.io/badge/lang-en-red)](README.en.md) [![ru](https://img.shields.io/badge/lang-ru-green)](README.md)
+[![en](https://img.shields.io/badge/lang-en-red)](README.en.md) [![ru](https://img.shields.io/badge/lang-ru-green)](README.md) <img src="cmd/fortochka/icon.png" width="64" align="right" alt="fortochka icon">
 
 # fortochka
 
