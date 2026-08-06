@@ -40,6 +40,7 @@ var groups = map[string][]string{
 	"youtube": {
 		"youtube.com",
 		"youtu.be",
+		"youtube-nocookie.com",
 		"googlevideo.com",
 		"ytimg.com",
 		"ggpht.com",

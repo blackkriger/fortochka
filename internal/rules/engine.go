@@ -29,11 +29,17 @@ type Rule struct {
 	Action  Action
 }
 
+// Manual and fetched rules compile into separate matchers. Merging them would decide by specificity rather than by origin: the lists carry entries like www.youtube.com, and a longest-suffix search reaches those before a manual youtube.com, so the override would silently lose.
 type compiled struct {
+	manual matcher
+	list   matcher
+	def    Action
+}
+
+type matcher struct {
 	suffixes map[string]Action
 	keywords []Rule
 	cidrs    []cidrRule
-	def      Action
 }
 
 type cidrRule struct {
@@ -74,47 +80,54 @@ func (e *Engine) SetList(r []Rule) {
 func (e *Engine) rebuild() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	all := make([]Rule, 0, len(e.manual)+len(e.list))
-	all = append(all, e.manual...) // manual first → wins on suffix map overwrite order
-	all = append(all, e.list...)
-	def := e.def
+	e.current.Store(&compiled{manual: compile(e.manual), list: compile(e.list), def: e.def})
+}
 
-	c := &compiled{suffixes: make(map[string]Action), def: def}
-	for _, r := range all {
+func compile(rs []Rule) matcher {
+	m := matcher{suffixes: make(map[string]Action, len(rs))}
+	for _, r := range rs {
 		switch {
 		case r.Suffix != "":
 			key := strings.ToLower(strings.TrimPrefix(r.Suffix, "."))
-			if _, seen := c.suffixes[key]; !seen {
-				c.suffixes[key] = r.Action
+			if _, seen := m.suffixes[key]; !seen {
+				m.suffixes[key] = r.Action
 			}
 		case r.Keyword != "":
-			c.keywords = append(c.keywords, r)
+			m.keywords = append(m.keywords, r)
 		case r.CIDR != "":
 			if p, err := netip.ParsePrefix(r.CIDR); err == nil {
-				c.cidrs = append(c.cidrs, cidrRule{prefix: p, action: r.Action})
+				m.cidrs = append(m.cidrs, cidrRule{prefix: p, action: r.Action})
 			}
 		}
 	}
-	e.current.Store(c)
+	return m
 }
 
-// Decide resolves an action for host (a domain or IP literal) and port.
+// Decide resolves an action for host (a domain or IP literal); a manual rule answers first whatever its shape, and only then the fetched lists.
 func (e *Engine) Decide(host string) Action {
 	c := e.current.Load()
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if a, ok := c.manual.match(host); ok {
+		return a
+	}
+	if a, ok := c.list.match(host); ok {
+		return a
+	}
+	return c.def
+}
 
+func (m matcher) match(host string) (Action, bool) {
 	if ip, err := netip.ParseAddr(host); err == nil {
-		for _, cr := range c.cidrs {
+		for _, cr := range m.cidrs {
 			if cr.prefix.Contains(ip) {
-				return cr.action
+				return cr.action, true
 			}
 		}
-		return c.def
+		return 0, false
 	}
-
 	for name := host; name != ""; {
-		if a, ok := c.suffixes[name]; ok {
-			return a
+		if a, ok := m.suffixes[name]; ok {
+			return a, true
 		}
 		i := strings.IndexByte(name, '.')
 		if i < 0 {
@@ -122,10 +135,10 @@ func (e *Engine) Decide(host string) Action {
 		}
 		name = name[i+1:]
 	}
-	for _, r := range c.keywords {
+	for _, r := range m.keywords {
 		if strings.Contains(host, r.Keyword) {
-			return r.Action
+			return r.Action, true
 		}
 	}
-	return c.def
+	return 0, false
 }

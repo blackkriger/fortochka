@@ -5,7 +5,7 @@ param([switch]$Resources)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = "0.5.0"
+$version = "0.5.1"
 $exe = "fortochka-$version.exe"
 
 if ($Resources) {
