@@ -83,8 +83,8 @@ func (c *Config) applyDefaults() {
 	if c.WG.DNS == "" {
 		c.WG.DNS = "1.1.1.1"
 	}
-	if c.Lists.Refresh <= 0 { // a negative interval in yaml would panic NewTicker and take the service down
-		c.Lists.Refresh = 6 * time.Hour
+	if c.Lists.Refresh <= 0 { // a non-positive interval would panic the timer and take the service down
+		c.Lists.Refresh = 12 * time.Hour // the block lists move slowly, and a refresh also happens whenever the tunnel comes up
 	}
 	if c.Lists.DefaultAction == "" {
 		c.Lists.DefaultAction = "direct"

@@ -290,6 +290,12 @@ func installService(exe string) error {
 		}
 		log.Printf("service installed")
 	} else {
+		// Running a newer build in place has to actually take over: repointing the config alone would leave the previous binary running, still holding its file, while the log claims the upgrade happened.
+		// EqualFold because Windows paths are case-insensitive: the same binary reached through differently-cased text is not an upgrade.
+		if cur, cerr := s.Config(); cerr == nil && !strings.EqualFold(cur.BinaryPathName, cfg.BinaryPathName) {
+			log.Printf("service: replacing %s", cur.BinaryPathName)
+			stopAndWait(s)
+		}
 		if err := s.UpdateConfig(cfg); err != nil {
 			s.Close()
 			return fmt.Errorf("update service: %w", err)
@@ -314,6 +320,20 @@ func installService(exe string) error {
 	return nil
 }
 
+// stopAndWait asks the service to stop and gives it a few seconds, so whatever comes next sees it stopped instead of racing it.
+func stopAndWait(s *mgr.Service) {
+	if _, err := s.Control(svc.Stop); err != nil {
+		return
+	}
+	for i := 0; i < 25; i++ {
+		q, err := s.Query()
+		if err != nil || q.State == svc.Stopped {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func uninstallService() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -327,15 +347,7 @@ func uninstallService() error {
 	}
 	defer s.Close()
 
-	if _, err := s.Control(svc.Stop); err == nil {
-		for i := 0; i < 25; i++ {
-			q, err := s.Query()
-			if err != nil || q.State == svc.Stopped {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-	}
+	stopAndWait(s)
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("delete service: %w", err)
 	}

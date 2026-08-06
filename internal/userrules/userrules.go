@@ -28,17 +28,65 @@ const template = `# Everything not listed here (and not in the block lists) goes
 #
 # Prefix a line with "!" to force it DIRECT instead: it bypasses the tunnel even when a fetched block list would route it through.
 #   !example.com
+#
+# A service name stands for every domain it needs, so its parts can't end up on different paths:
+#   youtube, instagram    the whole service through the tunnel
+#   !youtube              the whole service direct
 
 `
 
+// groups expand one keyword into every domain a service actually uses. Listing them by hand is error-prone: routing only youtube.com and googlevideo.com leaves the thumbnails, avatars and the player API on the other path, and the site half-works.
+var groups = map[string][]string{
+	"youtube": {
+		"youtube.com",
+		"youtu.be",
+		"googlevideo.com",
+		"ytimg.com",
+		"ggpht.com",
+		"youtubei.googleapis.com",
+		"youtube.googleapis.com",
+		"youtubeembeddedplayer.googleapis.com",
+	},
+	"instagram": {
+		"instagram.com",
+		"cdninstagram.com",
+		"fbcdn.net", // Instagram's media comes from Facebook's CDN, so this also moves Facebook and Messenger media
+	},
+}
+
 func Path(dir string) string { return filepath.Join(dir, fileName) }
 
-// EnsureDefault writes the commented template if the file does not exist yet.
+// headerMark identifies a header fortochka wrote. A file whose top comments do not carry it belongs to the user and is left exactly as found.
+const headerMark = "goes out directly."
+
+// EnsureDefault writes the commented template when the file is missing, and refreshes an outdated header on an existing one so newly added syntax is documented where it is actually used. Only the leading block of comments is replaced; rules and any notes below them are kept byte for byte.
 func EnsureDefault(path string) error {
-	if _, err := os.Stat(path); err == nil {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return os.WriteFile(path, []byte(template), 0o600)
+	}
+	if err != nil {
+		return err
+	}
+	head, body := splitHeader(string(data))
+	current, _ := splitHeader(template)
+	if head == current || !strings.Contains(head, headerMark) {
 		return nil
 	}
-	return os.WriteFile(path, []byte(template), 0o600)
+	return os.WriteFile(path, []byte(current+body), 0o600)
+}
+
+// splitHeader separates the leading run of comments and blank lines from everything below, so the header can be swapped without a rule ever being touched.
+func splitHeader(s string) (head, body string) {
+	lines := strings.SplitAfter(s, "\n")
+	i := 0
+	for ; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if t != "" && !strings.HasPrefix(t, "#") {
+			break
+		}
+	}
+	return strings.Join(lines[:i], ""), strings.Join(lines[i:], "")
 }
 
 // Load parses the file into routing rules: a plain entry routes through the tunnel, a "!"-prefixed entry forces it direct (overriding the fetched block lists).
@@ -67,6 +115,12 @@ func Load(path string) ([]rules.Rule, error) {
 		if strings.HasPrefix(line, "!") {
 			action = rules.Direct
 			line = strings.TrimSpace(line[1:])
+		}
+		if doms, ok := groups[strings.ToLower(line)]; ok {
+			for _, d := range doms {
+				out = append(out, rules.Rule{Suffix: d, Action: action})
+			}
+			continue
 		}
 		line = normalizeEntry(line)
 		if line == "" {

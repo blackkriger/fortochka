@@ -61,10 +61,13 @@ Your custom list lives in `C:\ProgramData\fortochka\rules.txt` (Tray → **Route
 - IPs / CIDRs — `198.51.100.7`, `203.0.113.0/24`
 - full URLs / host:port — `http://198.51.100.7:8082/` (scheme, port and path ignored)
 - prefix a line with `!` to force it **DIRECT** — bypasses the tunnel even if a fetched block list would route it through 
+- a service name — `youtube`, `instagram` — stands for domains that service needs. 
 
 Saving reloads live and immediately re-routes matching connections.
 
-Microsoft Store apps run inside the browser engine rather than as their own process, so they never appear in the app list — and routing the browser would route everything. Route them by address instead: for the Instagram app, `instagram.com` in the list is what sends it through the tunnel. 
+A service is more than its obvious domain: YouTube, for example, also loads thumbnails, avatars and its player API from elsewhere. Route only `youtube.com` and the site half-works, with the page on one path and the player API on the other. That is what the service are for — `!youtube` sends all of it direct. 
+
+Microsoft Store apps run inside the browser engine rather than as their own process, so they never appear in the app list — and routing the browser would route everything. Route them by address instead: for the Instagram app, `instagram` in the list covers the page, its media and the CDN in one line. 
 
 ## Build
 

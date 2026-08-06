@@ -40,7 +40,8 @@ type Daemon struct {
 	cancel  context.CancelFunc
 
 	statePath string
-	pacOK     bool // false when the PAC port could not be bound, so the tray is not told to point the system at it
+	listsWake chan struct{} // nudges the list refresher when the tunnel comes up
+	pacOK     bool          // false when the PAC port could not be bound, so the tray is not told to point the system at it
 
 	applyMu sync.Mutex // serializes reconcile and state writes so a stale snapshot can't be applied after a newer one
 
@@ -65,6 +66,7 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 		selApps:   map[string]bool{},
 		lastState: wg.State(-1),
 		statePath: appstate.Path(dir),
+		listsWake: make(chan struct{}, 1),
 	}
 	state := appstate.Load(d.statePath)
 	d.tunnelWanted = state.TunnelWanted
@@ -106,6 +108,10 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 		DomainsURL: cfg.Lists.RefilterDomains,
 		IPsURL:     cfg.Lists.RefilterIPs,
 		Refresh:    cfg.Lists.Refresh,
+		Dial:       d.tunnel.DialContext,
+		Ready:      tunnelReady,
+		CacheDir:   dir,
+		Wake:       d.listsWake,
 	}, engine)
 
 	ln, err := net.Listen("tcp", cfg.Listen.Proxy)
@@ -327,6 +333,12 @@ func (d *Daemon) watch(ctx context.Context) {
 			if changed {
 				log.Printf("tunnel: %s", stateName(s))
 				d.reconcile()
+				if s == wg.Connected {
+					select {
+					case d.listsWake <- struct{}{}: // a refresh that is due can only run now that there is a tunnel to run it through
+					default:
+					}
+				}
 			}
 			d.superviseTunnel(wanted, s, &downSince)
 		}
