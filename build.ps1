@@ -5,8 +5,9 @@ param([switch]$Resources)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = "0.5.1"
-$exe = "fortochka-$version.exe"
+$version = "0.6.0"
+# The name carries no version: the updater replaces the running binary at its own path, and a moving filename would mean rewriting the service registration on every update.
+$exe = "fortochka.exe"
 
 if ($Resources) {
   pwsh -NoProfile -File .\tools\genicons.ps1 -OutDir "cmd\fortochka"
@@ -24,10 +25,11 @@ Write-Output ("sha256 {0} -> {1}.sha256" -f $hash, $exe)
 Get-ChildItem "fortochka*.exe", "fortochka*.exe.sha256" -File -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -ne $exe -and $_.Name -ne "$exe.sha256" } |
   ForEach-Object {
+    $name = $_.Name
     try {
       Remove-Item $_.FullName -ErrorAction Stop
-      Write-Output ("removed {0}" -f $_.Name)
+      Write-Output ("removed {0}" -f $name)
     } catch {
-      Write-Output ("kept {0} — in use" -f $_.Name)
+      Write-Output ("kept {0} — in use" -f $name)
     }
   } 

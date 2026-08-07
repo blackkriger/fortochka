@@ -24,6 +24,7 @@ import (
 	"fortochka/internal/procnet"
 	"fortochka/internal/proxy"
 	"fortochka/internal/rules"
+	"fortochka/internal/selfupdate"
 	"fortochka/internal/userrules"
 	"fortochka/internal/wg"
 	"fortochka/internal/wgconf"
@@ -45,8 +46,11 @@ type Daemon struct {
 
 	applyMu sync.Mutex // serializes reconcile and state writes so a stale snapshot can't be applied after a newer one
 
+	updateWake chan struct{} // nudges the updater when the tunnel comes up
+
 	mu           sync.Mutex
 	tunnelWanted bool
+	autoUpdate   bool
 	selApps      map[string]bool
 	lastState    wg.State
 	rebuildFails int
@@ -58,18 +62,20 @@ type Daemon struct {
 }
 
 // New builds the engine from cfg (using dir for state/tunnel/rules), starts the proxy/PAC/rules/lists and resumes the tunnel if it was up last session.
-func New(cfg *config.Config, dir string) (*Daemon, error) {
+func New(cfg *config.Config, dir, version string) (*Daemon, error) {
 	d := &Daemon{
-		cfg:       cfg,
-		dir:       dir,
-		tunnel:    wg.NewManager(),
-		selApps:   map[string]bool{},
-		lastState: wg.State(-1),
-		statePath: appstate.Path(dir),
-		listsWake: make(chan struct{}, 1),
+		cfg:        cfg,
+		dir:        dir,
+		tunnel:     wg.NewManager(),
+		selApps:    map[string]bool{},
+		lastState:  wg.State(-1),
+		statePath:  appstate.Path(dir),
+		listsWake:  make(chan struct{}, 1),
+		updateWake: make(chan struct{}, 1),
 	}
 	state := appstate.Load(d.statePath)
 	d.tunnelWanted = state.TunnelWanted
+	d.autoUpdate = !state.AutoUpdateOff
 	for _, a := range state.TunnelApps {
 		if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
 			d.selApps[a] = true
@@ -85,7 +91,8 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 
 	tunnelReady := func() bool { return d.tunnel.State() == wg.Connected }
 	// WGReady is set here, not after Serve starts: assigning it later would be a data race with the accept goroutines.
-	server := &proxy.Server{Engine: engine, Direct: &net.Dialer{}, WG: d.tunnel, ForceWG: d.forceWGForPort, WGReady: tunnelReady}
+	direct := &proxy.DirectDialer{Tunnel: d.tunnel, Ready: tunnelReady, DNS: resolverAddr(cfg.WG.DNS)}
+	server := &proxy.Server{Engine: engine, Direct: direct, WG: d.tunnel, ForceWG: d.forceWGForPort, WGReady: tunnelReady}
 
 	rulesPath := userrules.Path(dir)
 	if err := userrules.EnsureDefault(rulesPath); err != nil {
@@ -113,6 +120,14 @@ func New(cfg *config.Config, dir string) (*Daemon, error) {
 		CacheDir:   dir,
 		Wake:       d.listsWake,
 	}, engine)
+	go selfupdate.Run(ctx, selfupdate.Source{
+		Version: version,
+		Dial:    d.tunnel.DialContext,
+		Ready:   tunnelReady,
+		Enabled: d.autoUpdateOn,
+		Wake:    d.updateWake,
+		Restart: selfupdate.Restart,
+	})
 
 	ln, err := net.Listen("tcp", cfg.Listen.Proxy)
 	if err != nil {
@@ -193,6 +208,8 @@ func (d *Daemon) Handle(req ipc.Request) ipc.Response {
 		}
 	case ipc.CmdSetApps:
 		d.SetApps(req.Apps)
+	case ipc.CmdSetAutoUpdate:
+		d.SetAutoUpdate(req.On)
 	default:
 		return ipc.Response{Error: "unknown command: " + req.Cmd}
 	}
@@ -204,6 +221,7 @@ func (d *Daemon) Status() ipc.Status {
 	d.mu.Lock()
 	apps := sortedKeys(d.selApps)
 	wanted := d.tunnelWanted
+	autoUpdate := d.autoUpdate
 	d.mu.Unlock()
 	pacURL := ""
 	if d.pacOK {
@@ -225,6 +243,7 @@ func (d *Daemon) Status() ipc.Status {
 		AppNames:     named,
 		PACURL:       pacURL,
 		ProxyAddr:    d.cfg.Listen.Proxy,
+		AutoUpdateOn: autoUpdate,
 	}
 }
 
@@ -275,6 +294,27 @@ func (d *Daemon) Import(data []byte) error {
 	d.persist()
 	log.Printf("daemon: imported config, connecting -> %s", c.Endpoint)
 	return nil
+}
+
+func (d *Daemon) autoUpdateOn() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.autoUpdate
+}
+
+// SetAutoUpdate flips automatic updating and, when turning it on, wakes the updater so a release that is already out is picked up now rather than at the next check.
+func (d *Daemon) SetAutoUpdate(on bool) {
+	d.mu.Lock()
+	d.autoUpdate = on
+	d.mu.Unlock()
+	d.persist()
+	if on {
+		select {
+		case d.updateWake <- struct{}{}:
+		default:
+		}
+	}
+	log.Printf("daemon: automatic updates -> %v", on)
 }
 
 func (d *Daemon) SetApps(names []string) {
@@ -336,6 +376,10 @@ func (d *Daemon) watch(ctx context.Context) {
 				if s == wg.Connected {
 					select {
 					case d.listsWake <- struct{}{}: // a refresh that is due can only run now that there is a tunnel to run it through
+					default:
+					}
+					select {
+					case d.updateWake <- struct{}{}: // same for the update check: it downloads through the tunnel
 					default:
 					}
 				}
@@ -452,6 +496,19 @@ func (d *Daemon) heartbeat(ctx context.Context, server *proxy.Server) {
 	}
 }
 
+// resolverAddr picks the first server from a WireGuard DNS setting (which may list several) and gives it a port, for the lookups the proxy retries inside the tunnel.
+func resolverAddr(dns string) string {
+	first, _, _ := strings.Cut(dns, ",")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(first); err == nil {
+		return first
+	}
+	return net.JoinHostPort(first, "53")
+}
+
 func dash(s string) string {
 	if s == "" {
 		return "—"
@@ -486,7 +543,7 @@ func (d *Daemon) persist() {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	d.mu.Lock()
-	s := appstate.State{TunnelWanted: d.tunnelWanted, TunnelApps: sortedKeys(d.selApps)}
+	s := appstate.State{TunnelWanted: d.tunnelWanted, TunnelApps: sortedKeys(d.selApps), AutoUpdateOff: !d.autoUpdate}
 	d.mu.Unlock()
 	if err := appstate.Save(d.statePath, s); err != nil {
 		log.Printf("daemon: save state: %v", err)

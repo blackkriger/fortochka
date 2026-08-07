@@ -43,7 +43,8 @@ Route address through tunnel…  edit the routed domain/IP list
 Route app through tunnel ▸     tick running apps to tunnel whole
 Service ▸                      Install service, or "fortochka on — click to turn off" (stop + remove)
                                Start with Windows — boot autostart
-More ▸                         Open program folder
+More ▸                         Update automatically
+                               Open program folder
                                Show / hide log console
 ───
 Quit                           close the tray (the engine keeps running)

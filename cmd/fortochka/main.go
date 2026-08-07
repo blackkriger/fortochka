@@ -44,12 +44,17 @@ func main() {
 		svcMode   = flag.Bool("service", false, "run as the Windows service (used by the SCM)")
 		install   = flag.Bool("install", false, "install and start the engine service, then enable the tray")
 		uninstall = flag.Bool("uninstall", false, "stop and remove the engine service")
+		restart   = flag.Bool("restart-service", false, "stop and start the engine service (used by the updater)")
 	)
 	flag.Parse()
 
 	switch {
 	case *svcMode:
 		runService()
+	case *restart:
+		if err := restartService(); err != nil {
+			log.Fatalf("restart: %v", err)
+		}
 	case *install:
 		if err := doInstall(); err != nil {
 			log.Fatalf("install: %v", err)
@@ -106,6 +111,7 @@ type tray struct {
 	mSvcInstall *systray.MenuItem
 	mSvc        *systray.MenuItem
 	mSvcAuto    *systray.MenuItem
+	mAutoUpdate *systray.MenuItem
 
 	clickMu      sync.Mutex
 	menuMu       sync.Mutex
@@ -154,6 +160,7 @@ func (t *tray) onReady() {
 	t.mSvcInstall.Hide()
 
 	mMore := systray.AddMenuItem("More", "Folder and logs")
+	t.mAutoUpdate = mMore.AddSubMenuItemCheckbox("Update automatically", "Install new releases as they come out", true)
 	mOpenDir := mMore.AddSubMenuItem("Open program folder", "Open the fortochka data folder")
 	mLog := mMore.AddSubMenuItem("Show / hide log console", "Toggle the live log window")
 	systray.AddSeparator()
@@ -167,6 +174,8 @@ func (t *tray) onReady() {
 				t.importConfig()
 			case <-t.mAddSite.ClickedCh:
 				openEditor(t.rulesPath)
+			case <-t.mAutoUpdate.ClickedCh:
+				t.toggleAutoUpdate()
 			case <-mOpenDir.ClickedCh:
 				openFolder(t.dir)
 			case <-mLog.ClickedCh:
@@ -255,6 +264,11 @@ func (t *tray) apply(st ipc.Status) {
 		t.mSvcAuto.Check()
 	} else {
 		t.mSvcAuto.Uncheck()
+	}
+	if st.AutoUpdateOn {
+		t.mAutoUpdate.Check()
+	} else {
+		t.mAutoUpdate.Uncheck()
 	}
 
 	// engine is reachable, so its IPC-backed actions are usable again
@@ -521,6 +535,22 @@ func (t *tray) toggleServiceAutostart() {
 	}
 	if st, ok := command(ipc.Request{Cmd: ipc.CmdSetAutostart, On: want}); ok {
 		log.Printf("tray: service autostart -> %v", want)
+		t.apply(st)
+	}
+}
+
+// toggleAutoUpdate flips automatic updating; the engine owns the setting, so it is only reachable while the service is up.
+func (t *tray) toggleAutoUpdate() {
+	t.mu.Lock()
+	want := !t.cur.AutoUpdateOn
+	up := t.serviceUp
+	t.mu.Unlock()
+	if !up {
+		log.Printf("tray: start the engine before changing automatic updates")
+		return
+	}
+	if st, ok := command(ipc.Request{Cmd: ipc.CmdSetAutoUpdate, On: want}); ok {
+		log.Printf("tray: automatic updates -> %v", want)
 		t.apply(st)
 	}
 }

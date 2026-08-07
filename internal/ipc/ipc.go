@@ -27,7 +27,8 @@ const (
 	CmdDisconnect   = "disconnect"
 	CmdImport       = "import"       // Data = raw .conf contents
 	CmdSetApps      = "setapps"      // Apps = exe base names to route
-	CmdSetAutostart = "setautostart" // On = start the service at boot (SCM StartType)
+	CmdSetAutostart  = "setautostart"  // On = start the service at boot (SCM StartType)
+	CmdSetAutoUpdate = "setautoupdate" // On = install new releases automatically
 )
 
 type Request struct {
@@ -55,6 +56,7 @@ type Status struct {
 	PACURL       string            `json:"pac_url"`             // for the tray's per-user system proxy
 	ProxyAddr    string            `json:"proxy_addr"`          // SOCKS5/HTTP mixed proxy address
 	AutostartOn  bool              `json:"autostart_on"`        // service SCM StartType == Automatic
+	AutoUpdateOn bool              `json:"auto_update_on"`
 }
 
 // Handler processes one request and returns a response (server side).

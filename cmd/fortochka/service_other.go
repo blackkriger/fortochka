@@ -10,5 +10,6 @@ func doUninstall() error        { return nil }
 func ensureService() bool       { return true }
 func startEngineService() error { return nil }
 func stopEngineService() error  { return nil }
+func restartService() error     { return nil }
 func serviceInstalled() bool    { return false }
 func launchElevated(string)     {}

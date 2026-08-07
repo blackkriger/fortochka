@@ -43,7 +43,8 @@ Route address through tunnel…  редактировать список дом�
 Route app through tunnel ▸     отметить приложения — весь их трафик в туннель
 Service ▸                      Install service — поставить движок, либо «fortochka on — click to turn off» (стоп + удаление)
                                Start with Windows — автозапуск с системой
-More ▸                         Open program folder — папка данных
+More ▸                         Update automatically — ставить новые релизы сразу
+                               Open program folder — папка данных
                                Show / hide log — окно логов
 ───
 Quit                           закрыть трей (движок продолжит работать, если не удалён)

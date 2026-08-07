@@ -10,6 +10,9 @@ import (
 type State struct {
 	TunnelWanted bool     `json:"tunnel_wanted"`
 	TunnelApps   []string `json:"tunnel_apps"`
+
+	// Stored inverted so the zero value keeps updates on, which is what an install that predates this setting should get.
+	AutoUpdateOff bool `json:"auto_update_off"`
 }
 
 func Path(dir string) string { return filepath.Join(dir, "state.json") }

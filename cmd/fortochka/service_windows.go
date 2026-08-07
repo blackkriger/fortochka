@@ -23,6 +23,7 @@ import (
 	"fortochka/internal/daemon"
 	"fortochka/internal/ipc"
 	"fortochka/internal/paths"
+	"fortochka/internal/selfupdate"
 	"fortochka/internal/windivert"
 )
 
@@ -43,7 +44,8 @@ func (serviceHandler) Execute(args []string, r <-chan svc.ChangeRequest, changes
 	if f := setupServiceLogging(dir); f != nil {
 		defer f.Close()
 	}
-	log.Printf("========== fortochka service start ==========")
+	log.Printf("========== fortochka service start (v%s) ==========", version)
+	selfupdate.CleanOld()
 
 	if err := windivert.Init(dir); err != nil {
 		log.Printf("service: windivert init: %v", err)
@@ -52,7 +54,7 @@ func (serviceHandler) Execute(args []string, r <-chan svc.ChangeRequest, changes
 		log.Printf("service: write default config: %v", err)
 	}
 
-	d, err := daemon.New(loadServiceConfig(dir), dir)
+	d, err := daemon.New(loadServiceConfig(dir), dir, version)
 	if err != nil {
 		log.Printf("service: engine start failed: %v", err)
 		changes <- svc.Status{State: svc.Stopped}
@@ -332,6 +334,28 @@ func stopAndWait(s *mgr.Service) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// restartService is the detached step of a self-update: it runs from the freshly installed binary and brings the service back onto it.
+func restartService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("open service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("open service: %w", err)
+	}
+	defer s.Close()
+
+	stopAndWait(s)
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+	log.Printf("service restarted onto the updated binary")
+	return nil
 }
 
 func uninstallService() error {
