@@ -153,7 +153,7 @@ func (s *Server) forceWGFor(conn net.Conn) bool {
 	return s.ForceWG(uint16(ra.Port))
 }
 
-// dialTimeout shortens the wait while the tunnel is reconnecting: the client already got a success reply by this point, so refusing outright would look like a dropped connection and invite an immediate retry — a quick failure lets it back off normally instead of waiting out the full timeout.
+// dialTimeout shortens the wait while the tunnel is reconnecting, so a client gets a refusal it can act on instead of waiting out the full timeout on a route that cannot carry it yet.
 func (s *Server) dialTimeout(viaWG bool) time.Duration {
 	if viaWG && s.WGReady != nil && !s.WGReady() {
 		return 5 * time.Second // long enough to ride out a first handshake right after Connect, short enough not to look like a hang
@@ -168,7 +168,8 @@ func (s *Server) dialerFor(host string, forceWG bool) (Dialer, string) {
 	return s.Direct, "direct"
 }
 
-func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
+// relay dials the destination before letting the caller answer the client, so a dial that fails is reported as a proxy error. Answering first and closing on failure looks to a browser like a tunnel that opened and died mid-handshake, which it reports as a broken site rather than an unreachable one.
+func (s *Server) relay(client net.Conn, host, port string, forceWG bool, reply func(error) error) {
 	client.SetReadDeadline(time.Time{})
 	dialer, route := s.dialerFor(host, forceWG)
 	viaWG := route == "wg"
@@ -196,9 +197,13 @@ func (s *Server) relay(client net.Conn, host, port string, forceWG bool) {
 			s.st.directFail.Add(1)
 		}
 		log.Printf("proxy: dial %s:%s via %s failed: %v", host, port, route, err)
+		reply(err)
 		return
 	}
 	defer upstream.Close()
+	if reply(nil) != nil {
+		return
+	}
 	up, down := pipe(client, upstream)
 	if viaWG {
 		s.st.wgUp.Add(up)
@@ -289,10 +294,25 @@ func (s *Server) handleSocks(conn net.Conn, br *bufio.Reader, forceWG bool) {
 	}
 	port := strconv.Itoa(int(binary.BigEndian.Uint16(pb)))
 
-	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
-		return
+	s.relay(conn, host, port, forceWG, func(dialErr error) error {
+		_, err := conn.Write([]byte{0x05, socksStatus(dialErr), 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		if dialErr != nil {
+			return dialErr
+		}
+		return err
+	})
+}
+
+// socksStatus maps a dial failure onto the SOCKS5 reply codes a client can tell apart: a name that did not resolve is reported as an unreachable host rather than a generic failure.
+func socksStatus(err error) byte {
+	switch {
+	case err == nil:
+		return 0x00
+	case isLookupFailure(err):
+		return 0x04
+	default:
+		return 0x05
 	}
-	s.relay(conn, host, port, forceWG)
 }
 
 // --- HTTP (CONNECT tunnel, plus best-effort plain proxying) ---
@@ -308,10 +328,14 @@ func (s *Server) handleHTTP(conn net.Conn, br *bufio.Reader, forceWG bool) {
 		}
 		if req.Method == http.MethodConnect {
 			host, port := splitHostPort(req.Host, "443")
-			if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-				return
-			}
-			s.relay(conn, host, port, forceWG)
+			s.relay(conn, host, port, forceWG, func(dialErr error) error {
+				if dialErr != nil {
+					fmt.Fprintf(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+					return dialErr
+				}
+				_, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+				return err
+			})
 			return
 		}
 		if !s.forwardHTTP(conn, req, forceWG) {
