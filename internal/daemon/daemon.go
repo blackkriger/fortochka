@@ -31,8 +31,9 @@ import (
 )
 
 type Daemon struct {
-	cfg    *config.Config
-	dir    string
+	cfg     *config.Config
+	dir     string
+	version string
 	tunnel *wg.Manager
 	apps   *apptunnel.Engine
 
@@ -66,6 +67,7 @@ func New(cfg *config.Config, dir, version string) (*Daemon, error) {
 	d := &Daemon{
 		cfg:        cfg,
 		dir:        dir,
+		version:    version,
 		tunnel:     wg.NewManager(),
 		selApps:    map[string]bool{},
 		lastState:  wg.State(-1),
@@ -244,6 +246,7 @@ func (d *Daemon) Status() ipc.Status {
 		PACURL:       pacURL,
 		ProxyAddr:    d.cfg.Listen.Proxy,
 		AutoUpdateOn: autoUpdate,
+		Version:      d.version,
 	}
 }
 

@@ -89,7 +89,7 @@ func arm(t *time.Timer, d time.Duration) {
 }
 
 func checkAndApply(ctx context.Context, src Source) error {
-	rel, err := latest(ctx, src)
+	rel, err := latest(ctx, src, src.Version)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ type release struct {
 	SumURL  string
 }
 
-func latest(ctx context.Context, src Source) (release, error) {
+func latest(ctx context.Context, src Source, current string) (release, error) {
 	var body struct {
 		TagName string `json:"tag_name"`
 		Assets  []struct {
@@ -184,6 +184,9 @@ func latest(ctx context.Context, src Source) (release, error) {
 		return release{}, fmt.Errorf("parse release: %w", err)
 	}
 	rel := release{Version: strings.TrimPrefix(strings.TrimSpace(body.TagName), "v")}
+	if !newer(rel.Version, current) {
+		return rel, nil // assets are only worth checking for a release we would actually install
+	}
 	for _, a := range body.Assets {
 		switch a.Name {
 		case assetName:

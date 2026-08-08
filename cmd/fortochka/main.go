@@ -112,6 +112,7 @@ type tray struct {
 	mSvc        *systray.MenuItem
 	mSvcAuto    *systray.MenuItem
 	mAutoUpdate *systray.MenuItem
+	mVersion    *systray.MenuItem
 
 	clickMu      sync.Mutex
 	menuMu       sync.Mutex
@@ -161,6 +162,8 @@ func (t *tray) onReady() {
 
 	mMore := systray.AddMenuItem("More", "Folder and logs")
 	t.mAutoUpdate = mMore.AddSubMenuItemCheckbox("Update automatically", "Install new releases as they come out", true)
+	t.mVersion = mMore.AddSubMenuItem(versionLabel(""), "The running build")
+	t.mVersion.Disable()
 	mOpenDir := mMore.AddSubMenuItem("Open program folder", "Open the fortochka data folder")
 	mLog := mMore.AddSubMenuItem("Show / hide log console", "Toggle the live log window")
 	systray.AddSeparator()
@@ -270,6 +273,7 @@ func (t *tray) apply(st ipc.Status) {
 	} else {
 		t.mAutoUpdate.Uncheck()
 	}
+	t.mVersion.SetTitle(versionLabel(st.Version))
 
 	// engine is reachable, so its IPC-backed actions are usable again
 	t.mImport.Enable()
@@ -664,6 +668,14 @@ func tunnelLabel(st ipc.Status) string {
 	default:
 		return "Connect"
 	}
+}
+
+// versionLabel reports the engine's build rather than the tray's, since that is the one an update replaces; the tray's own stands in only while the engine is unreachable.
+func versionLabel(engine string) string {
+	if engine == "" {
+		return "fortochka " + version
+	}
+	return "fortochka " + engine
 }
 
 func dash(s string) string {

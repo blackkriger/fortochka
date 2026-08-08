@@ -5,7 +5,7 @@ param([switch]$Resources)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = "0.6.0"
+$version = "0.6.1"
 # The name carries no version: the updater replaces the running binary at its own path, and a moving filename would mean rewriting the service registration on every update.
 $exe = "fortochka.exe"
 

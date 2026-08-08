@@ -44,6 +44,7 @@ Route app through tunnel ▸     отметить приложения — ве�
 Service ▸                      Install service — поставить движок, либо «fortochka on — click to turn off» (стоп + удаление)
                                Start with Windows — автозапуск с системой
 More ▸                         Update automatically — ставить новые релизы сразу
+                               fortochka 0.6.1
                                Open program folder — папка данных
                                Show / hide log — окно логов
 ───

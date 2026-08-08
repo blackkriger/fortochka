@@ -57,6 +57,7 @@ type Status struct {
 	ProxyAddr    string            `json:"proxy_addr"`          // SOCKS5/HTTP mixed proxy address
 	AutostartOn  bool              `json:"autostart_on"`        // service SCM StartType == Automatic
 	AutoUpdateOn bool              `json:"auto_update_on"`
+	Version      string            `json:"version"` // the engine's build, which after an update differs from the tray's until the tray is restarted
 }
 
 // Handler processes one request and returns a response (server side).
