@@ -369,6 +369,7 @@ func (s *Server) forwardHTTP(conn net.Conn, req *http.Request, forceWG bool) boo
 			s.st.directFail.Add(1)
 		}
 		log.Printf("proxy: dial %s:%s via %s failed: %v", host, port, route, err)
+		fmt.Fprintf(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return false
 	}
 	defer upstream.Close()
