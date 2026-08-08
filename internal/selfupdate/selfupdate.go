@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +23,6 @@ import (
 const (
 	releaseAPI = "https://api.github.com/repos/blackkriger/fortochka/releases/latest"
 	assetName  = "fortochka.exe"
-	checkEvery = 24 * time.Hour
-	retryAfter = time.Hour
 )
 
 type Source struct {
@@ -33,72 +32,24 @@ type Source struct {
 	// Dial routes the download through the tunnel: the release host is commonly throttled where fortochka is used, and a direct download would also announce the upgrade to the ISP.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 
-	// Ready reports whether the tunnel can carry the download.
-	Ready func() bool
-
-	// Enabled reports whether the user has left automatic updating on; it is read at each check so the tray toggle takes effect without a restart.
-	Enabled func() bool
-
-	// Wake is signalled when the tunnel comes up, so the first check happens then instead of failing and waiting out the retry.
-	Wake <-chan struct{}
-
 	// Restart stops and starts the service so it runs the replaced binary.
 	Restart func() error
 }
 
-// Run checks for a newer release and installs it, then keeps checking until ctx is cancelled. Every failure is logged and retried later, never fatal: a broken update path must not cost the user their tunnel.
-func Run(ctx context.Context, src Source) {
+// Check looks for a newer release once and installs it. There is no schedule: the tray asks for this when it starts, which is the moment a new version can actually matter to the user. Failures are logged by the caller and simply wait for the next launch — a broken update path must not cost the user their tunnel.
+func Check(ctx context.Context, src Source) error {
 	if src.Version == "" || src.Version == "dev" {
-		log.Printf("update: unversioned build — automatic updates are off")
-		return
+		log.Printf("update: unversioned build — nothing to compare against")
+		return nil
 	}
-	t := time.NewTimer(0)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		case <-src.Wake:
-		}
-		wait := checkEvery
-		if src.Enabled != nil && !src.Enabled() {
-			arm(t, wait)
-			continue
-		}
-		if src.Ready != nil && !src.Ready() {
-			arm(t, retryAfter)
-			continue
-		}
-		if err := checkAndApply(ctx, src); err != nil {
-			log.Printf("update: %v", err)
-			wait = retryAfter
-		}
-		arm(t, wait)
-	}
-}
-
-func arm(t *time.Timer, d time.Duration) {
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
-}
-
-func checkAndApply(ctx context.Context, src Source) error {
+	log.Printf("update: checking for a release newer than %s", src.Version)
 	rel, err := latest(ctx, src, src.Version)
 	if err != nil {
 		return err
 	}
 	if !newer(rel.Version, src.Version) {
+		log.Printf("update: latest release is %s, nothing to install", dash(rel.Version))
 		return nil
-	}
-	// Checked only once a newer release exists: releases published before the binary got a stable name carry differently named assets, and demanding them earlier would log a failure on every check with nothing to install.
-	if rel.URL == "" || rel.SumURL == "" {
-		return fmt.Errorf("release %s has no %s + .sha256 pair", rel.Version, assetName)
 	}
 	log.Printf("update: %s is available (running %s)", rel.Version, src.Version)
 
@@ -109,29 +60,37 @@ func checkAndApply(ctx context.Context, src Source) error {
 	if err := install(ctx, src, rel, exe); err != nil {
 		return err
 	}
-	log.Printf("update: installed %s, restarting the service", rel.Version)
 	if src.Restart == nil {
 		return nil
 	}
-	return src.Restart()
+	log.Printf("update: restarting the service onto %s", rel.Version)
+	if err := src.Restart(); err != nil {
+		return fmt.Errorf("restart failed, %s is installed and starts with the next launch: %w", rel.Version, err)
+	}
+	return nil
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 // install downloads beside the running binary and swaps it in. The temporary file is a sibling on purpose: a rename is atomic only within one volume, so staging in the temp directory would turn the swap into a copy with a window where the file on disk is incomplete.
 func install(ctx context.Context, src Source, rel release, exe string) error {
-	want, err := expectedSum(ctx, src, rel)
-	if err != nil {
-		return err
-	}
 	tmp := exe + ".new"
-	sum, err := download(ctx, src, rel.URL, tmp)
+	log.Printf("update: downloading %s through the tunnel", rel.URL)
+	sum, n, err := download(ctx, src, rel.URL, tmp)
 	if err != nil {
 		os.Remove(tmp)
-		return err
+		return fmt.Errorf("download: %w", err)
 	}
-	if sum != want {
+	if sum != rel.Sum {
 		os.Remove(tmp)
-		return fmt.Errorf("checksum mismatch: got %s, want %s", sum, want)
+		return fmt.Errorf("checksum mismatch after %d bytes: got %s, want %s", n, sum, rel.Sum)
 	}
+	log.Printf("update: downloaded %d bytes, checksum matches the release notes", n)
 	old := exe + ".old"
 	os.Remove(old) // a leftover from a previous update would block the rename
 	if err := os.Rename(exe, old); err != nil {
@@ -164,12 +123,16 @@ func CleanOld() {
 type release struct {
 	Version string
 	URL     string
-	SumURL  string
+	Sum     string // the sha256, read out of the release notes where it is published
 }
+
+// sumPattern picks the digest out of the release notes: a sha256 is the only 64-character hex run that appears there.
+var sumPattern = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
 
 func latest(ctx context.Context, src Source, current string) (release, error) {
 	var body struct {
 		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
 		Assets  []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
@@ -187,61 +150,45 @@ func latest(ctx context.Context, src Source, current string) (release, error) {
 	if !newer(rel.Version, current) {
 		return rel, nil // assets are only worth checking for a release we would actually install
 	}
+	rel.Sum = strings.ToLower(sumPattern.FindString(body.Body))
 	for _, a := range body.Assets {
-		switch a.Name {
-		case assetName:
+		if a.Name == assetName {
 			rel.URL = a.URL
-		case assetName + ".sha256":
-			rel.SumURL = a.URL
 		}
 	}
-	if rel.Version == "" {
-		return release{}, fmt.Errorf("release has no tag")
+	if rel.URL == "" {
+		return release{}, fmt.Errorf("release %q has no %s", body.TagName, assetName)
+	}
+	if rel.Sum == "" {
+		return release{}, fmt.Errorf("release %q publishes no sha256 for %s", body.TagName, assetName)
 	}
 	return rel, nil
 }
 
-// expectedSum reads the checksum published alongside the binary. It is a guard against a truncated or corrupted download, not against a tampered release: both files come from the same place, so whoever could replace one could replace the other.
-func expectedSum(ctx context.Context, src Source, rel release) (string, error) {
-	resp, err := get(ctx, src, rel.SumURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-	sum, _, _ := strings.Cut(strings.TrimSpace(string(data)), " ")
-	if len(sum) != 64 {
-		return "", fmt.Errorf("malformed checksum file")
-	}
-	return strings.ToLower(sum), nil
-}
-
-func download(ctx context.Context, src Source, url, dest string) (string, error) {
+func download(ctx context.Context, src Source, url, dest string) (string, int64, error) {
 	resp, err := get(ctx, src, url)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
+	n, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	if err != nil {
 		f.Close()
-		return "", err
+		return "", n, err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return "", err
+		return "", n, err
 	}
 	if err := f.Close(); err != nil {
-		return "", err
+		return "", n, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
 func get(ctx context.Context, src Source, url string) (*http.Response, error) {
@@ -266,6 +213,9 @@ func get(ctx context.Context, src Source, url string) (*http.Response, error) {
 	}
 	return resp, nil
 }
+
+// Newer reports whether a is a later version than b; the tray uses it to notice that the engine has moved ahead of it.
+func Newer(a, b string) bool { return newer(a, b) }
 
 // newer compares dotted numeric versions field by field, so 0.10.0 sorts above 0.9.0 where a string compare would not.
 func newer(a, b string) bool {

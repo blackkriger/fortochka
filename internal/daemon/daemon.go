@@ -47,11 +47,14 @@ type Daemon struct {
 
 	applyMu sync.Mutex // serializes reconcile and state writes so a stale snapshot can't be applied after a newer one
 
-	updateWake chan struct{} // nudges the updater when the tunnel comes up
+	updateSrc selfupdate.Source
+	updateCtx context.Context
 
 	mu           sync.Mutex
 	tunnelWanted bool
 	autoUpdate   bool
+	updateAsked  bool // a check was requested but the tunnel it downloads through was not up yet
+	updateBusy   bool
 	selApps      map[string]bool
 	lastState    wg.State
 	rebuildFails int
@@ -73,7 +76,6 @@ func New(cfg *config.Config, dir, version string) (*Daemon, error) {
 		lastState:  wg.State(-1),
 		statePath:  appstate.Path(dir),
 		listsWake:  make(chan struct{}, 1),
-		updateWake: make(chan struct{}, 1),
 	}
 	state := appstate.Load(d.statePath)
 	d.tunnelWanted = state.TunnelWanted
@@ -122,14 +124,12 @@ func New(cfg *config.Config, dir, version string) (*Daemon, error) {
 		CacheDir:   dir,
 		Wake:       d.listsWake,
 	}, engine)
-	go selfupdate.Run(ctx, selfupdate.Source{
+	d.updateSrc = selfupdate.Source{
 		Version: version,
 		Dial:    d.tunnel.DialContext,
-		Ready:   tunnelReady,
-		Enabled: d.autoUpdateOn,
-		Wake:    d.updateWake,
 		Restart: selfupdate.Restart,
-	})
+	}
+	d.updateCtx = ctx
 
 	ln, err := net.Listen("tcp", cfg.Listen.Proxy)
 	if err != nil {
@@ -212,6 +212,8 @@ func (d *Daemon) Handle(req ipc.Request) ipc.Response {
 		d.SetApps(req.Apps)
 	case ipc.CmdSetAutoUpdate:
 		d.SetAutoUpdate(req.On)
+	case ipc.CmdCheckUpdate:
+		d.CheckUpdate()
 	default:
 		return ipc.Response{Error: "unknown command: " + req.Cmd}
 	}
@@ -299,25 +301,48 @@ func (d *Daemon) Import(data []byte) error {
 	return nil
 }
 
-func (d *Daemon) autoUpdateOn() bool {
+// CheckUpdate runs the one update check of this session, asked for by the tray as it starts. The download needs the tunnel, which is still coming up at that moment, so a request made too early is remembered and served once the tunnel reports connected.
+func (d *Daemon) CheckUpdate() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.autoUpdate
+	if !d.autoUpdate {
+		d.mu.Unlock()
+		return
+	}
+	if d.tunnel.State() != wg.Connected {
+		d.updateAsked = true
+		d.mu.Unlock()
+		log.Printf("update: check requested, waiting for the tunnel it downloads through")
+		return
+	}
+	if d.updateBusy {
+		d.mu.Unlock()
+		return
+	}
+	d.updateBusy, d.updateAsked = true, false
+	d.mu.Unlock()
+
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			d.updateBusy = false
+			d.mu.Unlock()
+		}()
+		if err := selfupdate.Check(d.updateCtx, d.updateSrc); err != nil {
+			log.Printf("update: %v", err)
+		}
+	}()
 }
 
-// SetAutoUpdate flips automatic updating and, when turning it on, wakes the updater so a release that is already out is picked up now rather than at the next check.
+// SetAutoUpdate flips automatic updating; turning it on checks straight away rather than leaving the user to relaunch for it to take effect.
 func (d *Daemon) SetAutoUpdate(on bool) {
 	d.mu.Lock()
 	d.autoUpdate = on
 	d.mu.Unlock()
 	d.persist()
-	if on {
-		select {
-		case d.updateWake <- struct{}{}:
-		default:
-		}
-	}
 	log.Printf("daemon: automatic updates -> %v", on)
+	if on {
+		d.CheckUpdate()
+	}
 }
 
 func (d *Daemon) SetApps(names []string) {
@@ -381,9 +406,11 @@ func (d *Daemon) watch(ctx context.Context) {
 					case d.listsWake <- struct{}{}: // a refresh that is due can only run now that there is a tunnel to run it through
 					default:
 					}
-					select {
-					case d.updateWake <- struct{}{}: // same for the update check: it downloads through the tunnel
-					default:
+					d.mu.Lock()
+					pending := d.updateAsked
+					d.mu.Unlock()
+					if pending { // the tray asked before there was a tunnel to download through
+						d.CheckUpdate()
 					}
 				}
 			}

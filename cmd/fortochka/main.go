@@ -21,6 +21,7 @@ import (
 	"fortochka/internal/filedialog"
 	"fortochka/internal/ipc"
 	"fortochka/internal/paths"
+	"fortochka/internal/selfupdate"
 	"fortochka/internal/sysproxy"
 	"fortochka/internal/userrules"
 )
@@ -75,6 +76,7 @@ func runTray() {
 	}
 	logConsole := newConsole(mux)
 	log.Printf("========== fortochka tray start (v%s) ==========", version)
+	selfupdate.CleanOld() // the previous image is only deletable once the tray that was running it has exited, so a fresh tray is the first chance
 
 	dir := paths.DataDir()
 	ui := &tray{
@@ -121,6 +123,8 @@ type tray struct {
 	lastState    string
 	proxyOn      bool
 	serviceUp    bool
+	updateAsked  bool
+	restarting   bool
 	offlineTicks int
 	appItems     map[string]*systray.MenuItem
 	lastAppsSig  string
@@ -274,6 +278,8 @@ func (t *tray) apply(st ipc.Status) {
 		t.mAutoUpdate.Uncheck()
 	}
 	t.mVersion.SetTitle(versionLabel(st.Version))
+	t.askUpdateOnce()
+	t.restartIfEngineIsNewer(st.Version)
 
 	// engine is reachable, so its IPC-backed actions are usable again
 	t.mImport.Enable()
@@ -541,6 +547,46 @@ func (t *tray) toggleServiceAutostart() {
 		log.Printf("tray: service autostart -> %v", want)
 		t.apply(st)
 	}
+}
+
+// askUpdateOnce asks the engine for the single update check of this session, at the first moment it is reachable. There is no schedule behind it: launching fortochka is the moment a new version can matter.
+func (t *tray) askUpdateOnce() {
+	t.mu.Lock()
+	if t.updateAsked {
+		t.mu.Unlock()
+		return
+	}
+	t.updateAsked = true
+	t.mu.Unlock()
+	go command(ipc.Request{Cmd: ipc.CmdCheckUpdate})
+}
+
+// restartIfEngineIsNewer relaunches the tray once the engine reports a later version than this process was built as, which happens when the update replaced the binary underneath a tray that keeps running the old image. Relaunching also frees that image so the leftover copy can finally be deleted.
+func (t *tray) restartIfEngineIsNewer(engine string) {
+	if engine == "" || !selfupdate.Newer(engine, version) {
+		return
+	}
+	t.mu.Lock()
+	if t.restarting {
+		t.mu.Unlock()
+		return
+	}
+	t.restarting = true
+	t.mu.Unlock()
+
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("tray: locate self for restart: %v", err)
+		return
+	}
+	log.Printf("tray: engine is %s and this tray is %s — restarting onto the new build", engine, version)
+	cmd := exec.Command(exe)
+	if err := cmd.Start(); err != nil {
+		log.Printf("tray: restart: %v", err)
+		return
+	}
+	_ = cmd.Process.Release()
+	systray.Quit()
 }
 
 // toggleAutoUpdate flips automatic updating; the engine owns the setting, so it is only reachable while the service is up.

@@ -29,6 +29,7 @@ const (
 	CmdSetApps      = "setapps"      // Apps = exe base names to route
 	CmdSetAutostart  = "setautostart"  // On = start the service at boot (SCM StartType)
 	CmdSetAutoUpdate = "setautoupdate" // On = install new releases automatically
+	CmdCheckUpdate   = "checkupdate"   // the tray asks once as it starts; there is no schedule
 )
 
 type Request struct {
