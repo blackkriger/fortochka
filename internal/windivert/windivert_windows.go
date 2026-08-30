@@ -31,6 +31,7 @@ var (
 	procRecv          = dll.NewProc("WinDivertRecv")
 	procSend          = dll.NewProc("WinDivertSend")
 	procClose         = dll.NewProc("WinDivertClose")
+	procShutdown      = dll.NewProc("WinDivertShutdown")
 	procCalcChecksums = dll.NewProc("WinDivertHelperCalcChecksums")
 )
 
@@ -155,6 +156,25 @@ func (h Handle) CalcChecksums(packet []byte, addr *Address, flags uint64) {
 		uintptr(unsafe.Pointer(addr)),
 		uintptr(flags),
 	)
+}
+
+// Shutdown values, matching WINDIVERT_SHUTDOWN.
+const (
+	ShutdownRecv = 0
+	ShutdownSend = 1
+	ShutdownBoth = 2
+)
+
+// Shutdown stops the handle diverting without closing it, so packets already taken out of the network stack can still be received and re-injected. Closing outright discards that queue, and those packets are simply lost to whoever sent them. The export is checked rather than assumed: calling a missing one through a lazy proc panics, and a DLL too old to have it should cost the drain, not the process.
+func (h Handle) Shutdown(how uint32) error {
+	if err := procShutdown.Find(); err != nil {
+		return err
+	}
+	r, _, e := procShutdown.Call(uintptr(h), uintptr(how))
+	if r == 0 {
+		return e
+	}
+	return nil
 }
 
 func (h Handle) Close() error {

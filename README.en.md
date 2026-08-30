@@ -44,7 +44,7 @@ Route app through tunnel ▸     tick running apps to tunnel whole
 Service ▸                      Install service, or "fortochka on — click to turn off" (stop + remove)
                                Start with Windows — boot autostart
 More ▸                         Update automatically
-                               fortochka 0.7.0
+                               fortochka 0.8.0
                                Open program folder
                                Show / hide log console
 ───

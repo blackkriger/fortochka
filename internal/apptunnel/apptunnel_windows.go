@@ -49,9 +49,10 @@ var errHandleClosed = errors.New("windivert: handle closed")
 
 // divHandle guards injections so a send can never run on a value that was already closed — Windows reuses handle numbers, so that write could land on an unrelated object. Recv is deliberately unguarded: closing the handle is what unblocks it.
 type divHandle struct {
-	mu     sync.RWMutex
-	h      windivert.Handle
-	closed bool
+	mu       sync.RWMutex
+	h        windivert.Handle
+	closed   bool
+	draining bool // shutdown issued: no new packets are diverted, but the queue is still being read back out
 }
 
 func newDivHandle(h windivert.Handle) *divHandle { return &divHandle{h: h} }
@@ -86,7 +87,36 @@ func (d *divHandle) isClosed() bool {
 	return d.closed
 }
 
+// retiring reports a handle on its way out, so its packet loop ending is expected rather than a fault worth logging.
+func (d *divHandle) retiring() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.closed || d.draining
+}
+
+// drainGrace bounds how long a retiring handle waits for its packet loop to empty the queue before closing anyway, so a reader that is gone or wedged cannot leak it.
+const drainGrace = 2 * time.Second
+
+// close retires the handle in the order WinDivert documents: stop diverting first, let the loop read back and re-inject whatever the driver already took out of the network stack, and only then close. Closing outright discards that queue, and those packets are lost to whoever sent them — which need not be a routed app at all.
 func (d *divHandle) close() {
+	d.mu.Lock()
+	if d.closed || d.draining {
+		d.mu.Unlock()
+		return
+	}
+	d.draining = true
+	h := d.h
+	d.mu.Unlock()
+
+	if err := h.Shutdown(windivert.ShutdownRecv); err != nil {
+		d.finish() // nothing left to drain, so do not leave it open
+		return
+	}
+	time.AfterFunc(drainGrace, d.finish)
+}
+
+// finish performs the close itself; it is idempotent because the packet loop and the grace timer both race to call it.
+func (d *divHandle) finish() {
 	d.mu.Lock()
 	if !d.closed {
 		d.closed = true
@@ -116,6 +146,7 @@ type udpFlow struct {
 	conn     net.Conn
 	injAddr  atomic.Pointer[windivert.Address] // refreshed per outbound packet so replies use the current interface
 	lastSeen atomic.Int64
+	stalls   atomic.Uint32 // consecutive full-buffer drops; any successful write clears it
 }
 
 // stats are cheap counters emitted periodically so a later log read shows whether the tunnel path actually carried traffic and where packets were lost.
@@ -123,6 +154,9 @@ type stats struct {
 	udpOut     atomic.Uint64 // app -> tunnel datagrams
 	udpIn      atomic.Uint64 // tunnel -> app datagrams
 	udpDrop    atomic.Uint64 // dropped because the tunnel send buffer was full
+	udpStalled atomic.Uint64 // flows torn down because their send buffer stopped draining
+	udpForeign atomic.Uint64 // datagrams passed through on a retained port that a routed app no longer owns
+	udpReopens atomic.Uint64 // capture filter rebuilds, each one an open/close pair in the driver
 	udpDialErr atomic.Uint64
 	tcpRouted  atomic.Uint64 // connections handed to the tunnel
 	sendClosed atomic.Uint64 // injection hit a closed handle, i.e. the guard caught a reopen/stop race
@@ -186,6 +220,12 @@ type Engine struct {
 	udpStopped bool
 	udpFlows   map[udpKey]*udpFlow
 	udpDirect  map[udpKey]int64
+
+	stickyMu    sync.Mutex
+	sticky      map[uint16]time.Time // ports kept in the filter, with when a routed app last owned each
+	lastCompact time.Time
+
+	liveUDP atomic.Pointer[map[uint16]bool] // ports a routed app owns right now, as opposed to ones the filter merely still carries
 }
 
 func New(dial Dialer, logf func(string, ...any)) *Engine {
@@ -305,6 +345,12 @@ func (e *Engine) start() error {
 	e.connMu.Lock()
 	e.redirects = map[net.Conn]net.Conn{}
 	e.connMu.Unlock()
+
+	// Retained ports belong to the run that collected them: keeping them would start the filter carrying ports the system has since handed to other processes, and would eat into the limit for no benefit.
+	e.stickyMu.Lock()
+	e.sticky = map[uint16]time.Time{}
+	e.lastCompact = time.Time{}
+	e.stickyMu.Unlock()
 
 	e.refreshSnapshots()
 
@@ -450,6 +496,12 @@ func (e *Engine) genOK(gen uint64) bool {
 	return e.running && e.gen == gen
 }
 
+func (e *Engine) isRunning() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.running
+}
+
 // --- narrow UDP capture: a handle scoped to the routed apps' UDP source ports, reopened when that set changes ---
 
 func (e *Engine) udpSupervisor(gen uint64) {
@@ -482,10 +534,68 @@ func (e *Engine) udpFilter() string {
 	return "outbound and udp and not impostor and (" + strings.Join(terms, " or ") + ")"
 }
 
+// udpPortTTL is how long a port stays in the filter after the routed app that owned it let it go. Removals are what made the filter churn: a port leaving is harmless to keep, while a port arriving must be picked up at once or that flow leaves untunnelled, so only arrivals justify reopening the handle. Expired ports are dropped in one batch, which turns a stream of reopens into one every TTL.
+const udpPortTTL = 5 * time.Minute
+
+// targetUDPPorts returns the ports the capture filter should carry: those a routed app owns now, plus those it owned within the TTL. It also publishes the live-only set, which decides whether an unidentifiable sender is treated as ours.
 func (e *Engine) targetUDPPorts() []uint16 {
+	live := e.liveUDPPorts()
+	liveCopy := make(map[uint16]bool, len(live))
+	for p := range live {
+		liveCopy[p] = true
+	}
+	e.liveUDP.Store(&liveCopy)
+
+	now := time.Now()
+	e.stickyMu.Lock()
+	defer e.stickyMu.Unlock()
+	if e.sticky == nil {
+		e.sticky = map[uint16]time.Time{}
+	}
+	for p := range live {
+		e.sticky[p] = now
+	}
+	if now.Sub(e.lastCompact) >= udpPortTTL {
+		var dropped int
+		for p, seen := range e.sticky {
+			if now.Sub(seen) >= udpPortTTL {
+				delete(e.sticky, p)
+				dropped++
+			}
+		}
+		e.lastCompact = now
+		if dropped > 0 {
+			e.logf("apptunnel: udp filter compacted — %d port(s) expired, %d kept", dropped, len(e.sticky))
+		}
+	}
+
+	ports := make([]uint16, 0, len(e.sticky))
+	for p := range e.sticky {
+		ports = append(ports, p)
+	}
+	if len(ports) > maxUDPPorts {
+		// Trim by age, not by port number: dropping the numerically largest could discard a port a routed app is using right now and send that flow out in the clear.
+		sort.Slice(ports, func(i, j int) bool { return e.sticky[ports[i]].After(e.sticky[ports[j]]) })
+		for _, p := range ports[maxUDPPorts:] {
+			delete(e.sticky, p)
+		}
+		ports = ports[:maxUDPPorts]
+		e.logf("apptunnel: routed udp ports exceed the %d the filter can hold — the oldest were dropped", maxUDPPorts)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports
+}
+
+// filterPorts reports how many ports the capture filter currently carries, so the log shows whether the retained set is growing.
+func (e *Engine) filterPorts() int {
+	e.stickyMu.Lock()
+	defer e.stickyMu.Unlock()
+	return len(e.sticky)
+}
+
+func (e *Engine) liveUDPPorts() map[uint16]bool {
 	decided := map[uint32]bool{}
 	seen := map[uint16]bool{}
-	var ports []uint16
 	// Both families: udp.SrcPort matches either, so listing v6 ports too lets handleIPv6 see (and drop) a routed app's IPv6 datagrams instead of them leaving uncaptured.
 	for _, snap := range []*map[uint16]uint32{e.udpPortPID.Load(), e.udpPortPID6.Load()} {
 		if snap == nil {
@@ -497,18 +607,12 @@ func (e *Engine) targetUDPPorts() []uint16 {
 				t = pid != 0 && pid != selfPID && e.targetApp(e.pidName(pid))
 				decided[pid] = t
 			}
-			if t && !seen[port] {
+			if t {
 				seen[port] = true
-				ports = append(ports, port)
 			}
 		}
 	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
-	if len(ports) > maxUDPPorts {
-		e.logf("apptunnel: %d routed udp ports exceed the %d the filter can hold — the rest stay direct", len(ports), maxUDPPorts)
-		ports = ports[:maxUDPPorts]
-	}
-	return ports
+	return seen
 }
 
 // reopenUDP swaps the UDP handle to one using filter (or none if filter is ""); the old handle's loop exits when it's closed.
@@ -548,6 +652,7 @@ func (e *Engine) reopenUDP(gen uint64, filter string) bool {
 	if old != nil {
 		old.close()
 	}
+	e.st.udpReopens.Add(1)
 	return true
 }
 
@@ -582,7 +687,9 @@ func (e *Engine) pidName(pid uint32) string {
 func (e *Engine) divertPackets(h *divHandle) {
 	defer func() {
 		if r := recover(); r != nil {
-			e.logf("apptunnel: packet loop panic: %v", r)
+			// The handle must not outlive its reader. WinDivert keeps taking matching packets out of the network stack for as long as a handle is open, and with nobody left to re-inject them they are simply lost — for the broad TCP filter that is every outbound connection on the machine, until the service is stopped. Losing interception (routed apps fall back to direct) is the lesser failure by a wide margin.
+			e.logf("apptunnel: packet loop panic: %v — closing the handle, its traffic now goes direct", r)
+			h.finish()
 		}
 	}()
 	buf := make([]byte, 65535)
@@ -591,12 +698,18 @@ func (e *Engine) divertPackets(h *divHandle) {
 	for {
 		n, addr, err := h.recv(buf)
 		if err != nil {
-			if !h.isClosed() { // a reopen or stop closes the handle under us and Recv reports an abort; only an unexpected failure is worth a line
+			if !h.retiring() { // a reopen or stop retires the handle under us and Recv reports an abort or an empty queue; only an unexpected failure is worth a line
 				e.logf("apptunnel: packet loop ended unexpectedly: %v", err)
 			}
+			h.finish() // the queue is drained: close now rather than waiting out the grace timer
 			return
 		}
 		p := buf[:n]
+		// Interception has been torn down and this is the tail of a retiring handle's queue: hand those packets back exactly as they were. Rewriting them now would aim them at a redirect listener that is already closing, and from this moment on the app's traffic goes direct anyway — so untouched is both correct and what the app is about to get regardless.
+		if h.retiring() && !e.isRunning() {
+			h.send(p, &addr)
+			continue
+		}
 		if e.handlePacket(h, p, &addr) {
 			if err := h.send(p, &addr); err != nil {
 				sendErrs++
@@ -818,11 +931,17 @@ func (e *Engine) handleUDP(p []byte, addr *windivert.Address, ihl int, srcIP net
 		if err := nbWrite(fl.conn, payload); err != nil {
 			if isTimeout(err) {
 				e.st.udpDrop.Add(1)
-				return false // send buffer full: drop this datagram (video is lossy), keep the flow
+				// One datagram lost to a burst is the intended cost (video is lossy). A socket whose buffer never drains again is not: lastSeen is refreshed above by the very datagrams being dropped, so the idle sweep never reaches such a flow and it keeps discarding everything the app sends for as long as it keeps sending. Tearing it down after a run of failures lets the next datagram build a working one.
+				if fl.stalls.Add(1) >= udpStallLimit {
+					e.st.udpStalled.Add(1)
+					e.evictUDP(key, fl)
+				}
+				return false
 			}
 			e.evictUDP(key, fl)
 			return false // the app is routed: drop rather than emit its datagram in the clear
 		}
+		fl.stalls.Store(0)
 		e.st.udpOut.Add(1)
 		return false
 	}
@@ -834,8 +953,13 @@ func (e *Engine) handleUDP(p []byte, addr *windivert.Address, ihl int, srcIP net
 
 	pid := e.udpPID(srcPort)
 	if pid == 0 {
+		// The filter also carries ports a routed app has already released, kept for a while to avoid reopening the handle. Those get recycled to other processes, so failing to identify the owner means something different depending on which set the port is in: on a live one it is a lookup that has not caught up and dropping is the safe answer, while on a merely retained one the datagram most likely belongs to someone else — the DNS client, say — and dropping it would break traffic that was never ours.
+		if lm := e.liveUDP.Load(); lm == nil || !(*lm)[srcPort] {
+			e.st.udpForeign.Add(1)
+			return true
+		}
 		e.st.udpUnknown.Add(1)
-		return false // the filter only carries routed apps' ports, so an unresolvable owner is far more likely ours than not: drop rather than emit in the clear, and do not cache so the next datagram retries
+		return false // a live routed port whose owner has not resolved yet: drop rather than emit in the clear, and do not cache so the next datagram retries
 	}
 	if pid == selfPID || !e.targetApp(e.pidName(pid)) { // selfPID: the tunnel's own encrypted datagrams must never be captured
 		e.udpMu.Lock()
@@ -876,7 +1000,7 @@ func (e *Engine) handleUDP(p []byte, addr *windivert.Address, ihl int, srcIP net
 		e.udpMu.Unlock()
 		conn.Close()
 		existing.lastSeen.Store(now)
-		nbWrite(existing.conn, payload)
+		e.countWrite(nbWrite(existing.conn, payload))
 		return false
 	}
 	e.udpFlows[key] = fl
@@ -884,8 +1008,18 @@ func (e *Engine) handleUDP(p []byte, addr *windivert.Address, ihl int, srcIP net
 
 	e.logf("apptunnel: %s owns udp :%d -> %s:%d (tunnel)", e.pidName(pid), srcPort, dstIP, dstPort)
 	go e.udpReader(key, fl)
-	nbWrite(conn, payload)
+	e.countWrite(nbWrite(conn, payload))
 	return false
+}
+
+// countWrite records a flow's first datagram, which is sent outside the steady-state path above and would otherwise be missing from the counters the log is read by.
+func (e *Engine) countWrite(err error) {
+	switch {
+	case err == nil:
+		e.st.udpOut.Add(1)
+	case isTimeout(err):
+		e.st.udpDrop.Add(1)
+	}
 }
 
 // udpWriteTimeout must stay above zero — gonet reports a timeout before it ever writes when the deadline is already past, dropping every datagram — yet stay small, since it bounds how long a full send buffer stalls the single capture loop. 1ms leaves room for scheduler preemption, which at ~100us would drop datagrams that had buffer space.
@@ -897,6 +1031,9 @@ func nbWrite(c net.Conn, b []byte) error {
 	_, err := c.Write(b)
 	return err
 }
+
+// udpStallLimit is how many consecutive full-buffer drops mark a flow as wedged rather than merely bursty. At voice packet rates this is a fraction of a second: short enough to rebuild before it is audible, long enough not to discard a flow over an ordinary burst.
+const udpStallLimit = 20
 
 func isTimeout(err error) bool {
 	var ne net.Error
@@ -957,12 +1094,13 @@ func (e *Engine) logStats() {
 	t, td, sc, se := s.tcpRouted.Load(), s.tcpDirect.Load(), s.sendClosed.Load(), s.sendErr.Load()
 	pr, v6, rs, uu := s.pruned.Load(), s.v6Blocked.Load(), s.reSYN.Load(), s.udpUnknown.Load()
 	ro, rn, rd, rl := s.redirOK.Load(), s.redirNoMap.Load(), s.redirDeny.Load(), s.redirDial.Load()
-	sum := o + i + d + de + t + td + sc + se + pr + v6 + rs + uu + ro + rn + rd + rl
+	st, fo, rp := s.udpStalled.Load(), s.udpForeign.Load(), s.udpReopens.Load()
+	sum := o + i + d + de + t + td + sc + se + pr + v6 + rs + uu + ro + rn + rd + rl + st + fo + rp
 	if e.lastStatSum.Swap(sum) == sum {
 		return
 	}
-	e.logf("apptunnel: udp out=%d in=%d drop=%d dialerr=%d unknown=%d | tcp routed=%d direct=%d resyn=%d pruned=%d | redirect ok=%d nomap=%d deny=%d dialerr=%d | inject closed=%d err=%d | v6 blocked=%d",
-		o, i, d, de, uu, t, td, rs, pr, ro, rn, rd, rl, sc, se, v6)
+	e.logf("apptunnel: udp out=%d in=%d drop=%d stalled=%d dialerr=%d unknown=%d foreign=%d reopens=%d ports=%d | tcp routed=%d direct=%d resyn=%d pruned=%d | redirect ok=%d nomap=%d deny=%d dialerr=%d | inject closed=%d err=%d | v6 blocked=%d",
+		o, i, d, st, de, uu, fo, rp, e.filterPorts(), t, td, rs, pr, ro, rn, rd, rl, sc, se, v6)
 }
 
 func (e *Engine) evictUDP(key udpKey, fl *udpFlow) {

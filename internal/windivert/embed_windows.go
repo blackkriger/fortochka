@@ -37,6 +37,7 @@ func bind(dllPath string) {
 	procRecv = dll.NewProc("WinDivertRecv")
 	procSend = dll.NewProc("WinDivertSend")
 	procClose = dll.NewProc("WinDivertClose")
+	procShutdown = dll.NewProc("WinDivertShutdown")
 	procCalcChecksums = dll.NewProc("WinDivertHelperCalcChecksums")
 }
 
