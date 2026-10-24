@@ -8,8 +8,9 @@ import (
 
 // State is the small bit of UI state fortochka remembers between runs.
 type State struct {
-	TunnelWanted bool     `json:"tunnel_wanted"`
-	TunnelApps   []string `json:"tunnel_apps"`
+	TunnelWanted   bool              `json:"tunnel_wanted"`
+	TunnelApps     []string          `json:"tunnel_apps"`
+	TunnelAppNames map[string]string `json:"tunnel_app_names,omitempty"`
 
 	// Stored inverted so the zero value keeps updates on, which is what an install that predates this setting should get.
 	AutoUpdateOff bool `json:"auto_update_off"`

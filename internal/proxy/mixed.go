@@ -169,7 +169,7 @@ func (s *Server) dialerFor(host string, forceWG bool) (Dialer, string) {
 }
 
 // relay dials the destination before letting the caller answer the client, so a dial that fails is reported as a proxy error. Answering first and closing on failure looks to a browser like a tunnel that opened and died mid-handshake, which it reports as a broken site rather than an unreachable one.
-func (s *Server) relay(client net.Conn, host, port string, forceWG bool, reply func(error) error) {
+func (s *Server) relay(client net.Conn, clientR *bufio.Reader, host, port string, forceWG bool, reply func(error) error) {
 	client.SetReadDeadline(time.Time{})
 	dialer, route := s.dialerFor(host, forceWG)
 	viaWG := route == "wg"
@@ -204,7 +204,7 @@ func (s *Server) relay(client net.Conn, host, port string, forceWG bool, reply f
 	if reply(nil) != nil {
 		return
 	}
-	up, down := pipe(client, upstream)
+	up, down := pipe(client, clientR, upstream)
 	if viaWG {
 		s.st.wgUp.Add(up)
 		s.st.wgDown.Add(down)
@@ -217,10 +217,10 @@ func (s *Server) relay(client net.Conn, host, port string, forceWG bool, reply f
 	}
 }
 
-func pipe(client, upstream net.Conn) (up, down int64) {
+func pipe(client net.Conn, clientR io.Reader, upstream net.Conn) (up, down int64) {
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); up, _ = io.Copy(upstream, client); halfClose(upstream) }()
+	go func() { defer wg.Done(); up, _ = io.Copy(upstream, clientR); halfClose(upstream) }()
 	go func() { defer wg.Done(); down, _ = io.Copy(client, upstream); halfClose(client) }()
 	wg.Wait()
 	return up, down
@@ -294,7 +294,7 @@ func (s *Server) handleSocks(conn net.Conn, br *bufio.Reader, forceWG bool) {
 	}
 	port := strconv.Itoa(int(binary.BigEndian.Uint16(pb)))
 
-	s.relay(conn, host, port, forceWG, func(dialErr error) error {
+	s.relay(conn, br, host, port, forceWG, func(dialErr error) error {
 		_, err := conn.Write([]byte{0x05, socksStatus(dialErr), 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		if dialErr != nil {
 			return dialErr
@@ -328,7 +328,7 @@ func (s *Server) handleHTTP(conn net.Conn, br *bufio.Reader, forceWG bool) {
 		}
 		if req.Method == http.MethodConnect {
 			host, port := splitHostPort(req.Host, "443")
-			s.relay(conn, host, port, forceWG, func(dialErr error) error {
+			s.relay(conn, br, host, port, forceWG, func(dialErr error) error {
 				if dialErr != nil {
 					fmt.Fprintf(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 					return dialErr

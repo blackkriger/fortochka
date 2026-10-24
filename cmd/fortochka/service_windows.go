@@ -41,15 +41,23 @@ func (serviceHandler) Execute(args []string, r <-chan svc.ChangeRequest, changes
 	changes <- svc.Status{State: svc.StartPending}
 
 	dir := paths.DataDir()
+	_ = os.MkdirAll(dir, 0o755)
 	if f := setupServiceLogging(dir); f != nil {
 		defer f.Close()
 	}
 	log.Printf("========== fortochka service start (v%s) ==========", version)
+	if err := secureDataDir(dir, true); err != nil {
+		log.Printf("service: secure data dir: %v", err)
+	}
 	selfupdate.CleanOld()
+	removeOldBinaries(paths.InstalledExe())
 
-	if err := windivert.Init(dir); err != nil {
+	installDir := paths.InstallDir()
+	_ = os.MkdirAll(installDir, 0o755)
+	if err := windivert.Init(installDir); err != nil {
 		log.Printf("service: windivert init: %v", err)
 	}
+	removeLegacyDriverFiles(dir)
 	if err := config.EnsureDefault(filepath.Join(dir, "fortochka.yaml")); err != nil {
 		log.Printf("service: write default config: %v", err)
 	}
@@ -173,25 +181,39 @@ func loadServiceConfig(dir string) *config.Config {
 	return config.Default()
 }
 
-// doInstall installs (or repairs) and starts the service, grants the user start/stop rights, and clears leftover tray autostart, self-elevating first if needed.
+// doInstall copies this build into Program Files, installs (or repairs) and starts the service from there, locks the data dir down, grants the user start/stop rights, and clears leftover tray autostart, self-elevating first if needed.
 func doInstall() error {
 	if !isAdmin() {
 		launchElevated("-install")
 		return nil
 	}
 	dir := paths.DataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	if f := setupServiceLogging(dir); f != nil {
 		defer f.Close()
 	}
-	exe, err := os.Executable()
+	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
+	target := paths.InstalledExe()
+	replaced, err := placeBinary(self, target)
+	if err != nil {
+		return fmt.Errorf("copy to %s: %w", target, err)
+	}
+	if replaced {
+		log.Printf("install: placed v%s at %s", version, target)
+	}
 	migrateOldData(dir)
-	if err := installService(exe); err != nil {
+	if err := secureDataDir(dir, true); err != nil {
+		log.Printf("install: secure data dir: %v", err)
+	}
+	removeLegacyDriverFiles(dir)
+	if err := installService(target, replaced); err != nil {
 		return err
 	}
-	grantDataDirAccess(dir)
 	grantServiceControl()   // let the non-elevated tray start/stop the service
 	_ = autostart.Disable() // the tray no longer auto-starts; clear old Run key / task
 	log.Printf("install: done")
@@ -220,14 +242,7 @@ func migrateOldData(newDir string) {
 	}
 }
 
-// grantDataDirAccess gives the built-in Users group (S-1-5-32-545) inherited Modify on the LocalSystem-owned data dir so the non-elevated tray can read logs and edit rules.txt.
-func grantDataDirAccess(dir string) {
-	cmd := exec.Command("icacls", dir, "/grant", "*S-1-5-32-545:(OI)(CI)M", "/T", "/C", "/Q")
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
-	_ = cmd.Run()
-}
-
-// doUninstall removes the running parts of fortochka — the service, the WinDivert driver we loaded, the firewall rule, the tray autostart and any old first-run marker — but keeps the data dir (imported config, rules, state) so a later re-launch just works without re-importing. The exe ships in releases and is the user's to delete.
+// doUninstall removes the running parts of fortochka — the service, the WinDivert driver we loaded, the firewall rule, the tray autostart and any old first-run marker — but keeps the data dir (imported config, rules, state) and the copy in Program Files so a later re-launch just works without re-importing.
 func doUninstall() error {
 	if !isAdmin() {
 		launchElevated("-uninstall")
@@ -254,7 +269,8 @@ func removeWinDivertDriver() {
 	if err != nil {
 		return
 	}
-	if !strings.Contains(strings.ToLower(string(out)), strings.ToLower(paths.DataDir())) {
+	path := strings.ToLower(string(out))
+	if !strings.Contains(path, strings.ToLower(paths.InstallDir())) && !strings.Contains(path, strings.ToLower(paths.DataDir())) {
 		return
 	}
 	if hiddenCmd("sc.exe", "stop", "WinDivert").Run() == nil {
@@ -270,7 +286,7 @@ func removeMarker() {
 	hiddenCmd("reg.exe", "delete", `HKCU\Software\fortochka`, "/f").Run()
 }
 
-func installService(exe string) error {
+func installService(exe string, replaced bool) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("open service manager: %w", err)
@@ -296,6 +312,9 @@ func installService(exe string) error {
 		// EqualFold because Windows paths are case-insensitive: the same binary reached through differently-cased text is not an upgrade.
 		if cur, cerr := s.Config(); cerr == nil && !strings.EqualFold(cur.BinaryPathName, cfg.BinaryPathName) {
 			log.Printf("service: replacing %s", cur.BinaryPathName)
+			stopAndWait(s)
+		} else if replaced {
+			log.Printf("service: restarting onto the new binary")
 			stopAndWait(s)
 		}
 		if err := s.UpdateConfig(cfg); err != nil {
@@ -386,6 +405,10 @@ func ensureService() bool {
 	}
 	if serviceInstalled() {
 		log.Printf("tray: engine installed but stopped; use Engine ▸ Service to start it")
+		return false
+	}
+	if installDeclined {
+		log.Printf("tray: install was declined — the engine stays off until fortochka is launched again")
 		return false
 	}
 	log.Printf("tray: no engine installed — installing")

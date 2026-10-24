@@ -304,13 +304,12 @@ func fileDescription(path string) string {
 }
 
 // ResetAppTCP force-closes (DeleteTCB) the established TCP connections owned by the named processes so they reconnect and the interceptor captures them; returns how many were reset. Needs admin.
-func ResetAppTCP(names map[string]bool) int {
+func ResetAppTCP(names map[string]bool) (reset, failed int) {
 	buf := tcpTable()
 	if len(buf) < 4 {
-		return 0
+		return 0, 0
 	}
 	num := *(*uint32)(unsafe.Pointer(&buf[0]))
-	reset := 0
 	for i := uint32(0); i < num; i++ {
 		off := 4 + int(i)*tcpRowSize
 		if off+tcpRowSize > len(buf) {
@@ -333,7 +332,9 @@ func ResetAppTCP(names map[string]bool) int {
 		}
 		if r, _, _ := procSetTcpEntry.Call(uintptr(unsafe.Pointer(&row[0]))); r == 0 {
 			reset++
+		} else {
+			failed++ // the connection stays outside the tunnel, so this must not be silent
 		}
 	}
-	return reset
+	return reset, failed
 }

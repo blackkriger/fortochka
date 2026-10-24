@@ -13,3 +13,4 @@ func stopEngineService() error  { return nil }
 func restartService() error     { return nil }
 func serviceInstalled() bool    { return false }
 func launchElevated(string)     {}
+func handOffToInstalled() bool  { return false }

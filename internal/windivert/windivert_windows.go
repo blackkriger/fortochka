@@ -21,6 +21,7 @@ const (
 	EventNetworkPacket   = 0
 	EventFlowEstablished = 1
 	EventFlowDeleted     = 2
+	EventSocketBind      = 3
 	EventSocketConnect   = 4
 	EventSocketClose     = 7
 )
@@ -89,6 +90,9 @@ const invalidHandle = ^uintptr(0)
 
 // Open wraps WinDivertOpen. For the FLOW layer use flags Sniff|RecvOnly.
 func Open(filter string, layer int, priority int16, flags uint64) (Handle, error) {
+	if err := procOpen.Find(); err != nil {
+		return 0, fmt.Errorf("WinDivert.dll unavailable: %w", err) // calling a missing export through a lazy proc panics, and this one is reached from a retry timer
+	}
 	f, err := windows.BytePtrFromString(filter)
 	if err != nil {
 		return 0, err

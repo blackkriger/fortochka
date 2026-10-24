@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fortochka/internal/appstate"
@@ -46,6 +47,7 @@ type Daemon struct {
 	pacOK     bool          // false when the PAC port could not be bound, so the tray is not told to point the system at it
 
 	applyMu sync.Mutex // serializes reconcile and state writes so a stale snapshot can't be applied after a newer one
+	closing atomic.Bool
 
 	updateSrc selfupdate.Source
 	updateCtx context.Context
@@ -56,8 +58,11 @@ type Daemon struct {
 	updateAsked  bool // a check was requested but the tunnel it downloads through was not up yet
 	updateBusy   bool
 	selApps      map[string]bool
+	appNames     map[string]string
 	lastState    wg.State
 	rebuildFails int
+	startTries   int
+	lastStartTry time.Time
 
 	portMu     sync.Mutex
 	portSnap   map[uint16]uint32 // local-TCP-port → PID, refreshed at most every 500ms for the proxy per-app check
@@ -85,6 +90,7 @@ func New(cfg *config.Config, dir, version string) (*Daemon, error) {
 			d.selApps[a] = true
 		}
 	}
+	d.appNames, _ = learnNames(d.selApps, lowerKeys(state.TunnelAppNames), nil)
 	if _, err := os.Stat(d.tunnelPath()); err == nil {
 		secureFile(d.tunnelPath()) // lock down the key file (covers migrated configs too)
 	}
@@ -222,16 +228,22 @@ func (d *Daemon) Handle(req ipc.Request) ipc.Response {
 }
 
 func (d *Daemon) Status() ipc.Status {
+	named := apptunnel.RunningNetAppsNamed()
 	d.mu.Lock()
 	apps := sortedKeys(d.selApps)
 	wanted := d.tunnelWanted
 	autoUpdate := d.autoUpdate
+	var learned bool
+	d.appNames, learned = learnNames(d.selApps, d.appNames, named)
+	shown := displayNames(d.selApps, d.appNames, named)
 	d.mu.Unlock()
+	if learned {
+		go d.persist()
+	}
 	pacURL := ""
 	if d.pacOK {
 		pacURL = pac.URL(d.cfg.Listen.PAC)
 	}
-	named := apptunnel.RunningNetAppsNamed()
 	running := make([]string, 0, len(named))
 	for k := range named {
 		running = append(running, k)
@@ -244,7 +256,7 @@ func (d *Daemon) Status() ipc.Status {
 		TunnelWanted: wanted,
 		Apps:         apps,
 		RunningApps:  running,
-		AppNames:     named,
+		AppNames:     shown,
 		PACURL:       pacURL,
 		ProxyAddr:    d.cfg.Listen.Proxy,
 		AutoUpdateOn: autoUpdate,
@@ -346,6 +358,7 @@ func (d *Daemon) SetAutoUpdate(on bool) {
 }
 
 func (d *Daemon) SetApps(names []string) {
+	running := apptunnel.RunningNetAppsNamed()
 	d.mu.Lock()
 	d.selApps = map[string]bool{}
 	for _, n := range names {
@@ -353,6 +366,7 @@ func (d *Daemon) SetApps(names []string) {
 			d.selApps[n] = true
 		}
 	}
+	d.appNames, _ = learnNames(d.selApps, d.appNames, running)
 	d.mu.Unlock()
 	d.persist()
 	d.reconcile()
@@ -360,6 +374,7 @@ func (d *Daemon) SetApps(names []string) {
 }
 
 func (d *Daemon) Close() {
+	d.closing.Store(true) // before anything else: a reconcile already past the context check must not start interception back up
 	if d.cancel != nil {
 		d.cancel()
 	}
@@ -398,7 +413,27 @@ func (d *Daemon) watch(ctx context.Context) {
 			d.lastState = s
 			wanted := d.tunnelWanted
 			d.mu.Unlock()
+			// start() can fail on a busy :1083 or a WinDivert error, and only a state change calls reconcile — without this retry the selected apps stay outside the tunnel for the rest of the session while the tray still shows them ticked.
+			if !changed && s == wg.Connected && d.apps != nil && !d.apps.Active() {
+				d.mu.Lock()
+				due := len(d.selApps) > 0 && d.startTries < maxStartAttempts && time.Since(d.lastStartTry) >= startRetryEvery
+				if due {
+					d.startTries++
+					d.lastStartTry = time.Now()
+				}
+				tries := d.startTries
+				d.mu.Unlock()
+				if due {
+					d.reconcile()
+					if tries == maxStartAttempts && !d.apps.Active() {
+						log.Printf("apptunnel: interception did not start after %d attempts — the selected apps stay outside the tunnel until the selection or the tunnel changes", maxStartAttempts)
+					}
+				}
+			}
 			if changed {
+				d.mu.Lock()
+				d.startTries, d.lastStartTry = 0, time.Time{}
+				d.mu.Unlock()
 				log.Printf("tunnel: %s", stateName(s))
 				d.reconcile()
 				if s == wg.Connected {
@@ -546,7 +581,15 @@ func dash(s string) string {
 	return s
 }
 
+// maxStartAttempts and startRetryEvery bound the retry of a failed interception start: without them a permanently busy :1083 costs four connection-table walks and two log lines every second for the life of the service.
+const maxStartAttempts = 6
+
+const startRetryEvery = 10 * time.Second
+
 func (d *Daemon) reconcile() {
+	if d.closing.Load() {
+		return
+	}
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	state := d.tunnel.State()
@@ -573,7 +616,11 @@ func (d *Daemon) persist() {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	d.mu.Lock()
-	s := appstate.State{TunnelWanted: d.tunnelWanted, TunnelApps: sortedKeys(d.selApps), AutoUpdateOff: !d.autoUpdate}
+	names := make(map[string]string, len(d.appNames))
+	for k, v := range d.appNames {
+		names[k] = v
+	}
+	s := appstate.State{TunnelWanted: d.tunnelWanted, TunnelApps: sortedKeys(d.selApps), TunnelAppNames: names, AutoUpdateOff: !d.autoUpdate}
 	d.mu.Unlock()
 	if err := appstate.Save(d.statePath, s); err != nil {
 		log.Printf("daemon: save state: %v", err)

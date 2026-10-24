@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
@@ -46,10 +47,13 @@ func main() {
 		install   = flag.Bool("install", false, "install and start the engine service, then enable the tray")
 		uninstall = flag.Bool("uninstall", false, "stop and remove the engine service")
 		restart   = flag.Bool("restart-service", false, "stop and start the engine service (used by the updater)")
+		showVer   = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
 
 	switch {
+	case *showVer:
+		fmt.Println(version)
 	case *svcMode:
 		runService()
 	case *restart:
@@ -76,7 +80,12 @@ func runTray() {
 	}
 	logConsole := newConsole(mux)
 	log.Printf("========== fortochka tray start (v%s) ==========", version)
-	selfupdate.CleanOld() // the previous image is only deletable once the tray that was running it has exited, so a fresh tray is the first chance
+	if handOffToInstalled() {
+		return
+	}
+	if exe, err := os.Executable(); err == nil && !samePath(exe, paths.InstalledExe()) {
+		selfupdate.CleanOld() // the previous image is only deletable once the tray that was running it has exited, so a fresh tray is the first chance
+	}
 
 	dir := paths.DataDir()
 	ui := &tray{
@@ -330,13 +339,10 @@ func ourPAC(u string) bool {
 	return err == nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
-// appsSignature captures the visible app set and their checked state, so syncApps only rebuilds the menu when it actually changes — avoids the per-poll flicker.
-func appsSignature(set, selected map[string]bool, selfExe string) string {
-	names := make([]string, 0, len(set))
-	for n := range set {
-		if n == "" || n == selfExe {
-			continue
-		}
+// appsSignature captures the visible app set, their titles and their checked state, so syncApps only rebuilds the menu when it actually changes — avoids the per-poll flicker.
+func appsSignature(titles map[string]string, selected map[string]bool) string {
+	names := make([]string, 0, len(titles))
+	for n := range titles {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -348,9 +354,29 @@ func appsSignature(set, selected map[string]bool, selfExe string) string {
 		} else {
 			sb.WriteByte('-')
 		}
+		sb.WriteString(titles[n])
 		sb.WriteByte('\n')
 	}
 	return sb.String()
+}
+
+func appTitles(st ipc.Status, set map[string]bool, selfExe string) map[string]string {
+	titles := make(map[string]string, len(set))
+	seen := map[string]int{}
+	for name := range set {
+		if name == "" || name == selfExe {
+			continue
+		}
+		d := appDisplay(st, name)
+		titles[name] = d
+		seen[strings.ToLower(d)]++
+	}
+	for name, d := range titles {
+		if seen[strings.ToLower(d)] > 1 {
+			titles[name] = d + " (" + name + ")"
+		}
+	}
+	return titles
 }
 
 // syncApps keeps the "Route app through tunnel" submenu in step with the engine, listing running and selected apps and reflecting which are routed.
@@ -370,7 +396,8 @@ func (t *tray) syncApps(st ipc.Status) {
 	// menuMu covers compare-apply-publish as one step: publishing the signature first would let a slower goroutine apply stale checkboxes afterwards and then skip every later repair as "unchanged".
 	t.menuMu.Lock()
 	defer t.menuMu.Unlock()
-	sig := appsSignature(set, selected, t.selfExe)
+	titles := appTitles(st, set, t.selfExe)
+	sig := appsSignature(titles, selected)
 	t.mu.Lock()
 	unchanged := sig == t.lastAppsSig
 	t.mu.Unlock()
@@ -379,10 +406,9 @@ func (t *tray) syncApps(st ipc.Status) {
 	}
 
 	for _, name := range sortedKeys(set) {
-		if name == "" || name == t.selfExe {
-			continue
+		if title, ok := titles[name]; ok {
+			t.ensureAppItem(name, title, selected[name])
 		}
-		t.ensureAppItem(name, appDisplay(st, name), selected[name])
 	}
 
 	t.mu.Lock()
@@ -410,8 +436,10 @@ func (t *tray) syncApps(st ipc.Status) {
 
 func (t *tray) ensureAppItem(name, display string, checked bool) {
 	t.mu.Lock()
-	if _, ok := t.appItems[name]; ok {
+	if item, ok := t.appItems[name]; ok {
 		t.mu.Unlock()
+		item.SetTitle(display)
+		item.SetTooltip("Route " + display + " through the tunnel")
 		return
 	}
 	item := t.mApps.AddSubMenuItemCheckbox(display, "Route "+display+" through the tunnel", checked)
@@ -574,10 +602,12 @@ func (t *tray) restartIfEngineIsNewer(engine string) {
 	t.restarting = true
 	t.mu.Unlock()
 
-	exe, err := os.Executable()
-	if err != nil {
-		log.Printf("tray: locate self for restart: %v", err)
-		return
+	exe := paths.InstalledExe()
+	if _, err := os.Stat(exe); err != nil {
+		if exe, err = os.Executable(); err != nil {
+			log.Printf("tray: locate self for restart: %v", err)
+			return
+		}
 	}
 	log.Printf("tray: engine is %s and this tray is %s — restarting onto the new build", engine, version)
 	cmd := exec.Command(exe)
@@ -742,8 +772,8 @@ func sortedKeys(m map[string]bool) []string {
 
 func setupTrayLogging() (*logMux, *os.File) {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
-	dir := paths.DataDir()
-	if dir == "" {
+	dir := paths.UserDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		mux := newLogMux(os.Stderr)
 		log.SetOutput(mux)
 		return mux, nil

@@ -27,7 +27,7 @@ claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites
 
 ## Установка
 
-1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он сам поставит службу и автозапуск (разовый запрос прав администратора), а в трее появится **f** меню. 
+1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он скопирует себя в `C:\Program Files\fortochka`, поставит оттуда службу и автозапуск (разовый запрос прав администратора), а в трее появится **f** меню. Запуск более новой сборки так же один раз попросит права, чтобы обновить установленную копию. 
 2. Трей → **Import tunnel config…** → выбери свой wg или awg `.conf` 
 
 ## Меню в трее
@@ -44,7 +44,7 @@ Route app through tunnel ▸     отметить приложения — ве�
 Service ▸                      Install service — поставить движок, либо «fortochka on — click to turn off» (стоп + удаление)
                                Start with Windows — автозапуск с системой
 More ▸                         Update automatically — ставить новые релизы сразу
-                               fortochka 0.8.0
+                               fortochka 0.9.0
                                Open program folder — папка данных
                                Show / hide log — окно логов
 ───
@@ -57,7 +57,7 @@ Quit                           закрыть трей (движок продо�
 
 ## Правила маршрутизации
 
-Твой список — `C:\ProgramData\fortochka\rules.txt` (трей → **Route address through tunnel…** открывает его). По одной записи на строку, `#` — комментарий. Понимает:
+Твой список — `C:\ProgramData\fortochka\rules.txt` (трей → **Route address through tunnel…** открывает его). Остальные файлы в этой папке меняет только служба или администратор. По одной записи на строку, `#` — комментарий. Понимает:
 
 - домены — `claude.ai` (и поддомены тоже)
 - IP / CIDR — `198.51.100.7`, `203.0.113.0/24`
@@ -78,6 +78,6 @@ Quit                           закрыть трей (движок продо�
 .\build.ps1 -Resources   # also regenerates the icons + the .syso (icon + manifest)
 ```
 
-Требуется Go (см. `go.mod`) и Windows. `WinDivert.dll` + `WinDivert64.sys` вшиваются из `internal/windivert/bin` в exe и распаковываются в `C:\ProgramData\fortochka` в рантайме — на выходе должен быть один файл.
+Требуется Go (см. `go.mod`) и Windows. `WinDivert.dll` + `WinDivert64.sys` вшиваются из `internal/windivert/bin` в exe и распаковываются в `C:\Program Files\fortochka` в рантайме — на выходе должен быть один файл.
 
-Перехват пакетов работает на [WinDivert](https://github.com/basil00/WinDivert). Туннель AmneziaWG — на [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go).
+Перехват пакетов работает на [WinDivert](https://github.com/basil00/WinDivert) (LGPLv3 или GPLv2, текст лицензии — `internal/windivert/bin/LICENSE`). Туннель AmneziaWG — на [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go).
