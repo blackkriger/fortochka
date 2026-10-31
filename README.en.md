@@ -28,7 +28,7 @@ claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites
 ## Install
 
 1. Download the [latest release](https://github.com/blackkriger/fortochka/releases/latest) and run `fortochka.exe`. On first launch it copies itself to `C:\Program Files\fortochka`, installs the engine service from there and enables Start with Windows (a one-time admin prompt); the `f` menu will appear in the tray. Launching a newer build asks for admin rights once in the same way to update the installed copy.
-2. Tray → **Import tunnel config…** → pick your WireGuard or AmneziaWG `.conf`
+2. Tray → **Import tunnel config…** → pick your WireGuard or AmneziaWG `.conf` (AmneziaWG up to 3.1)
 
 ## The tray menu
 
@@ -44,7 +44,7 @@ Route app through tunnel ▸     tick running apps to tunnel whole
 Service ▸                      Install service, or "fortochka on — click to turn off" (stop + remove)
                                Start with Windows — boot autostart
 More ▸                         Update automatically
-                               fortochka 0.9.0
+                               fortochka 0.9.1
                                Open program folder
                                Show / hide log console
 ───

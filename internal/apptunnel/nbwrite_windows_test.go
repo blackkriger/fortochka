@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amnezia-vpn/amneziawg-go/tun/netstack"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
 )
 
 // TestNBWrite covers the regression where a write deadline of "now" made gonet report a timeout before it ever wrote, silently dropping every tunneled datagram.

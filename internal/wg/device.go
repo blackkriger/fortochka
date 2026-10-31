@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/tun/netstack"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
 )
 
 const tunnelMTU = 1420
@@ -23,24 +23,33 @@ const tunnelMTU = 1420
 // handshakeStaleAfter counts the tunnel as down; margin over RejectAfterTime (180s) so a healthy tunnel that re-handshakes late isn't flagged. hsFails is the fast signal.
 const handshakeStaleAfter = 210
 
+const defaultKeepalive = "25"
+
 type Config struct {
-	Endpoint        string
-	PrivateKey      string
-	ServerPublicKey string
-	PresharedKey    string
-	Address         string
-	DNS             string
+	Endpoint            string
+	PrivateKey          string
+	ServerPublicKey     string
+	PresharedKey        string
+	Address             string
+	DNS                 string
+	PersistentKeepalive string
 
 	// AmneziaWG obfuscation; empty = plain WireGuard.
-	Jc, Jmin, Jmax, S1, S2, H1, H2, H3, H4 string
+	Jc, Jmin, Jmax, S1, S2, S3, S4, H1, H2, H3, H4 string
+	I1, I2, I3, I4, I5                             string
+	HeaderProtectionKey, ContentPaddingAddition    string
+	RekeyAfterTime, RekeyTimeout, RejectAfterTime  string
+	KeepaliveTimeout, MaxHandshakeAttempts         string
+	RandomTrailers, DisableCookies                 string
 }
 
 // Device is a userspace WireGuard tunnel whose DialContext sends connections out through the tunnel, so the rule engine can pick it for blocked targets.
 type Device struct {
-	dev     *device.Device
-	net     *netstack.Net
-	hsFails atomic.Int32 // consecutive failed re-handshakes; a dying tunnel
-	lastHS  atomic.Int64 // last handshake timestamp seen, so a completed one can clear the streak
+	dev        *device.Device
+	net        *netstack.Net
+	staleAfter int64
+	hsFails    atomic.Int32 // consecutive failed re-handshakes; a dying tunnel
+	lastHS     atomic.Int64 // last handshake timestamp seen, so a completed one can clear the streak
 }
 
 func New(c Config) (*Device, error) {
@@ -58,7 +67,7 @@ func New(c Config) (*Device, error) {
 		return nil, fmt.Errorf("create netstack tun: %w", err)
 	}
 
-	d := &Device{net: tnet}
+	d := &Device{net: tnet, staleAfter: staleAfter(c)}
 	logger := &device.Logger{
 		Verbosef: func(format string, args ...any) {
 			d.noteHandshake(format)
@@ -132,7 +141,7 @@ func (d *Device) HandshakeOK() bool {
 			if d.hsFails.Load() >= 3 {
 				return false
 			}
-			return time.Now().Unix()-sec < handshakeStaleAfter
+			return time.Now().Unix()-sec < d.staleAfter
 		}
 	}
 	return false
@@ -149,9 +158,35 @@ func ipcConfig(c Config) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "private_key=%s\n", priv)
-	if c.Jc != "" {
-		fmt.Fprintf(&b, "jc=%s\njmin=%s\njmax=%s\ns1=%s\ns2=%s\n", c.Jc, c.Jmin, c.Jmax, c.S1, c.S2)
-		fmt.Fprintf(&b, "h1=%s\nh2=%s\nh3=%s\nh4=%s\n", c.H1, c.H2, c.H3, c.H4)
+	if c.HeaderProtectionKey != "" {
+		hpk, err := keyToHex(c.HeaderProtectionKey)
+		if err != nil {
+			return "", fmt.Errorf("header_protection_key: %w", err)
+		}
+		for i, s := range []string{c.S1, c.S2, c.S3, c.S4} {
+			if n, _ := strconv.Atoi(s); n < device.HeaderCipherNonceSize {
+				return "", fmt.Errorf("HeaderProtectionKey needs S1-S4 of at least %d, S%d is %d", device.HeaderCipherNonceSize, i+1, n)
+			}
+		}
+		fmt.Fprintf(&b, "header_protection_key=%s\n", hpk)
+	}
+	for _, p := range []struct{ key, val string }{
+		{"jc", c.Jc}, {"jmin", c.Jmin}, {"jmax", c.Jmax},
+		{"s1", c.S1}, {"s2", c.S2}, {"s3", c.S3}, {"s4", c.S4},
+		{"h1", c.H1}, {"h2", c.H2}, {"h3", c.H3}, {"h4", c.H4},
+		{"i1", c.I1}, {"i2", c.I2}, {"i3", c.I3}, {"i4", c.I4}, {"i5", c.I5},
+		{"content_padding_addition", c.ContentPaddingAddition},
+		{"rekey_after_time", c.RekeyAfterTime},
+		{"rekey_timeout", c.RekeyTimeout},
+		{"reject_after_time", c.RejectAfterTime},
+		{"keepalive_timeout", c.KeepaliveTimeout},
+		{"max_handshake_attempts", c.MaxHandshakeAttempts},
+		{"random_trailers", uapiBool(c.RandomTrailers)},
+		{"disable_cookies", uapiBool(c.DisableCookies)},
+	} {
+		if p.val != "" {
+			fmt.Fprintf(&b, "%s=%s\n", p.key, p.val)
+		}
 	}
 	fmt.Fprintf(&b, "public_key=%s\n", pub)
 	if c.PresharedKey != "" {
@@ -164,8 +199,43 @@ func ipcConfig(c Config) (string, error) {
 	fmt.Fprintf(&b, "endpoint=%s\n", c.Endpoint)
 	fmt.Fprintf(&b, "allowed_ip=0.0.0.0/0\n")
 	fmt.Fprintf(&b, "allowed_ip=::/0\n")
-	fmt.Fprintf(&b, "persistent_keepalive_interval=25\n")
+	fmt.Fprintf(&b, "persistent_keepalive_interval=%s\n", keepalive(c))
 	return b.String(), nil
+}
+
+func keepalive(c Config) string {
+	switch strings.ToLower(c.PersistentKeepalive) {
+	case "", "0", "0-0", "off", "(off)":
+		return defaultKeepalive
+	}
+	return c.PersistentKeepalive
+}
+
+func uapiBool(v string) string {
+	switch strings.ToLower(v) {
+	case "":
+		return ""
+	case "on", "1", "true", "t", "yes":
+		return "1"
+	}
+	return "0"
+}
+
+func staleAfter(c Config) int64 {
+	reject := rangeHi(c.RejectAfterTime, device.RejectAfterTime)
+	rekey := rangeHi(c.RekeyAfterTime, device.RekeyAfterTime) + rangeHi(keepalive(c), 0)
+	return handshakeStaleAfter - int64(device.RejectAfterTime/time.Second) + max(reject, rekey)
+}
+
+func rangeHi(v string, def time.Duration) int64 {
+	lo, hi, found := strings.Cut(v, "-")
+	if !found {
+		hi = lo
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(hi), 10, 64); err == nil && n > 0 {
+		return n
+	}
+	return int64(def / time.Second)
 }
 
 func keyToHex(key string) (string, error) {

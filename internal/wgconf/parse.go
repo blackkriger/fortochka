@@ -65,6 +65,10 @@ func parse(r io.Reader) (wg.Config, error) {
 				c.S1 = val
 			case "s2":
 				c.S2 = val
+			case "s3":
+				c.S3 = val
+			case "s4":
+				c.S4 = val
 			case "h1":
 				c.H1 = val
 			case "h2":
@@ -73,6 +77,34 @@ func parse(r io.Reader) (wg.Config, error) {
 				c.H3 = val
 			case "h4":
 				c.H4 = val
+			case "i1":
+				c.I1 = val
+			case "i2":
+				c.I2 = val
+			case "i3":
+				c.I3 = val
+			case "i4":
+				c.I4 = val
+			case "i5":
+				c.I5 = val
+			case "headerprotectionkey":
+				c.HeaderProtectionKey = val
+			case "contentpaddingaddition":
+				c.ContentPaddingAddition = val
+			case "rekeyaftertime":
+				c.RekeyAfterTime = val
+			case "rekeytimeout":
+				c.RekeyTimeout = val
+			case "rejectaftertime":
+				c.RejectAfterTime = val
+			case "keepalivetimeout":
+				c.KeepaliveTimeout = val
+			case "maxhandshakeattempts":
+				c.MaxHandshakeAttempts = val
+			case "randomtrailers":
+				c.RandomTrailers = val
+			case "disablecookies":
+				c.DisableCookies = val
 			}
 		case "peer":
 			switch key {
@@ -82,6 +114,8 @@ func parse(r io.Reader) (wg.Config, error) {
 				c.PresharedKey = val
 			case "endpoint":
 				c.Endpoint = val
+			case "persistentkeepalive":
+				c.PersistentKeepalive = val
 			}
 		}
 	}

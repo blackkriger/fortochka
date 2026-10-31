@@ -28,7 +28,7 @@ claude.exe ─WinDivert─┘                  └ wg/awg → blocked sites
 ## Установка
 
 1. Скачай [последний релиз](https://github.com/blackkriger/fortochka/releases/latest) и запусти `fortochka.exe`. При первом запуске он скопирует себя в `C:\Program Files\fortochka`, поставит оттуда службу и автозапуск (разовый запрос прав администратора), а в трее появится **f** меню. Запуск более новой сборки так же один раз попросит права, чтобы обновить установленную копию. 
-2. Трей → **Import tunnel config…** → выбери свой wg или awg `.conf` 
+2. Трей → **Import tunnel config…** → выбери свой wg или awg `.conf` (AmneziaWG до 3.1 включительно)
 
 ## Меню в трее
 
@@ -44,7 +44,7 @@ Route app through tunnel ▸     отметить приложения — ве�
 Service ▸                      Install service — поставить движок, либо «fortochka on — click to turn off» (стоп + удаление)
                                Start with Windows — автозапуск с системой
 More ▸                         Update automatically — ставить новые релизы сразу
-                               fortochka 0.9.0
+                               fortochka 0.9.1
                                Open program folder — папка данных
                                Show / hide log — окно логов
 ───
