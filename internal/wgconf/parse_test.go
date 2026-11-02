@@ -11,6 +11,7 @@ func TestParseAmneziaWG31(t *testing.T) {
 PrivateKey = cHJpdmF0ZQ==
 Address = 10.8.1.2/32, fd00::2/128
 DNS = 9.9.9.9
+MTU = 1280
 Jc = 5
 Jmin = 50
 Jmax = 1000
@@ -52,6 +53,7 @@ PersistentKeepalive = 20-30
 		Address:                "10.8.1.2/32",
 		DNS:                    "9.9.9.9",
 		PersistentKeepalive:    "20-30",
+		MTU:                    1280,
 		Jc:                     "5",
 		Jmin:                   "50",
 		Jmax:                   "1000",
@@ -77,6 +79,15 @@ PersistentKeepalive = 20-30
 	}
 	if got != want {
 		t.Errorf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+func TestParseRejectsBadMTU(t *testing.T) {
+	for _, mtu := range []string{"100", "70000", "auto"} {
+		_, err := Parse([]byte("[Interface]\nPrivateKey = cHJpdmF0ZQ==\nAddress = 10.8.1.2/32\nMTU = " + mtu + "\n[Peer]\nPublicKey = cHVibGlj\nEndpoint = 203.0.113.5:51820\n"))
+		if err == nil {
+			t.Errorf("MTU = %s must be refused", mtu)
+		}
 	}
 }
 

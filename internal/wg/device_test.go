@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,48 @@ func TestTunnelBetweenEngines(t *testing.T) {
 	}
 }
 
+func TestOuterPacketsFitEthernet(t *testing.T) {
+	hpk, _ := genKey(t)
+	client, server := pairConfigs(t)
+	profile := func(c Config) Config {
+		c = awg31(c, hpk)
+		c.S4 = "94"
+		c.MTU = 1280
+		return c
+	}
+	binds := bindtest.NewChannelBinds()
+	cbind := &recordingBind{Bind: binds[0]}
+	sbind := &recordingBind{Bind: binds[1]}
+	snet := startEngine(t, profile(server), sbind, true)
+	cnet := startEngine(t, profile(client), cbind, false)
+	if err := echo(cnet, snet, 10*time.Second); err != nil {
+		t.Fatalf("data must flow through the tunnel: %v", err)
+	}
+	const ethernetUDP = 1500 - 20 - 8
+	for side, b := range map[string]*recordingBind{"client": cbind, "server": sbind} {
+		if got := b.largest.Load(); got > ethernetUDP {
+			t.Errorf("%s sent a %d-byte datagram: with the config's MTU it must fit %d bytes, or it is fragmented on the wire", side, got, ethernetUDP)
+		}
+	}
+}
+
+type recordingBind struct {
+	conn.Bind
+	largest atomic.Int64
+}
+
+func (b *recordingBind) Send(bufs [][]byte, ep conn.Endpoint) error {
+	for _, p := range bufs {
+		for n := int64(len(p)); ; {
+			old := b.largest.Load()
+			if n <= old || b.largest.CompareAndSwap(old, n) {
+				break
+			}
+		}
+	}
+	return b.Bind.Send(bufs, ep)
+}
+
 func same(c Config) Config { return c }
 
 func awg20(c Config) Config {
@@ -186,7 +229,7 @@ func startPair(t *testing.T, client, server Config) (cnet, snet *netstack.Net) {
 
 func startEngine(t *testing.T, c Config, bind conn.Bind, server bool) *netstack.Net {
 	t.Helper()
-	tun, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParsePrefix(c.Address).Addr()}, nil, tunnelMTU)
+	tun, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParsePrefix(c.Address).Addr()}, nil, c.mtu())
 	if err != nil {
 		t.Fatal(err)
 	}

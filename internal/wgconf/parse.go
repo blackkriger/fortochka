@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"fortochka/internal/wg"
@@ -55,6 +56,12 @@ func parse(r io.Reader) (wg.Config, error) {
 				c.Address = firstField(val)
 			case "dns":
 				c.DNS = firstField(val)
+			case "mtu":
+				m, err := strconv.Atoi(val)
+				if err != nil || m < 576 || m > 65535 {
+					return wg.Config{}, fmt.Errorf("invalid MTU %q", val)
+				}
+				c.MTU = m
 			case "jc":
 				c.Jc = val
 			case "jmin":

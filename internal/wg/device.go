@@ -33,6 +33,7 @@ type Config struct {
 	Address             string
 	DNS                 string
 	PersistentKeepalive string
+	MTU                 int
 
 	// AmneziaWG obfuscation; empty = plain WireGuard.
 	Jc, Jmin, Jmax, S1, S2, S3, S4, H1, H2, H3, H4 string
@@ -62,7 +63,7 @@ func New(c Config) (*Device, error) {
 		return nil, fmt.Errorf("wg dns %q: %w", c.DNS, err)
 	}
 
-	tun, tnet, err := netstack.CreateNetTUN([]netip.Addr{addr.Addr()}, []netip.Addr{dns}, tunnelMTU)
+	tun, tnet, err := netstack.CreateNetTUN([]netip.Addr{addr.Addr()}, []netip.Addr{dns}, c.mtu())
 	if err != nil {
 		return nil, fmt.Errorf("create netstack tun: %w", err)
 	}
@@ -201,6 +202,13 @@ func ipcConfig(c Config) (string, error) {
 	fmt.Fprintf(&b, "allowed_ip=::/0\n")
 	fmt.Fprintf(&b, "persistent_keepalive_interval=%s\n", keepalive(c))
 	return b.String(), nil
+}
+
+func (c Config) mtu() int {
+	if c.MTU > 0 {
+		return c.MTU
+	}
+	return tunnelMTU
 }
 
 func keepalive(c Config) string {
